@@ -1,0 +1,2178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sevenbound: Chimera Islands - Playable Prototype</title>
+<style>
+  html, body { margin:0; width:100%; height:100%; background:#090b12; color:#e9f4ff; font-family: system-ui, Segoe UI, Arial, sans-serif; overflow:hidden; }
+  #wrap { width:100vw; height:100vh; display:grid; place-items:center; }
+  canvas { width:min(100vw, 177.78vh); height:min(56.25vw, 100vh); background:#111827; box-shadow:0 0 40px rgba(0,0,0,.8); image-rendering:auto; }
+  #loading { position:fixed; inset:0; display:grid; place-items:center; font-size:22px; letter-spacing:.04em; background:#090b12; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+<div id="loading">Loading Sevenbound prototype...</div>
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const loading = document.getElementById('loading');
+
+const assetPaths = {
+  heat: 'assets/heat.png',
+  void: 'assets/void.png',
+  cosmic: 'assets/cosmic.png',
+  equinox: 'assets/equinox.png',
+  titleKeyart: 'assets/title_keyart.png',
+  missionComplete: 'assets/mission_complete.png'
+};
+const assets = {};
+let assetsLoaded = 0;
+for (const [k, src] of Object.entries(assetPaths)) {
+  const img = new Image();
+  img.onload = () => { assetsLoaded++; if (assetsLoaded === Object.keys(assetPaths).length) boot(); };
+  img.onerror = () => { assetsLoaded++; if (assetsLoaded === Object.keys(assetPaths).length) boot(); };
+  img.src = src;
+  assets[k] = img;
+}
+
+const SAVE_KEY = 'sevenbound_chimera_islands_save_v2';
+const TAU = Math.PI * 2;
+const STATE_COLORS = {
+  heat: '#ff5d2e',
+  nival: '#58dbff',
+  void: '#9c4cff',
+  cosmic: '#f4d85e',
+  storm: '#a5f2ff',
+  toxic: '#83f54a',
+  alloy: '#bdc3d1',
+  fusion: '#ffffff'
+};
+
+let screen = 'title';
+let menuIndex = 0;
+let lastTime = 0;
+let game = null;
+let player = null;
+let camera = {x:0, y:0};
+let input = {};
+let selectedSlot = 0;
+let activeSummon = null;
+let pulses = [];
+let particles = [];
+let notifications = [];
+let lastLabMessage = '';
+let showMap = false;
+let assistMode = false;
+let activeLore = null;
+let loreIndex = 0;
+let journalReturnScreen = 'play';
+let loreReturnScreen = 'play';
+let labConsoleIndex = 0;
+let labBriefingIndex = 0;
+let labBriefingQueue = [];
+
+const keys = {};
+const keyEdges = {};
+window.addEventListener('keydown', (e) => {
+  if (!keys[e.code]) keyEdges[e.code] = true;
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Escape','Tab'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+let prevGpButtons = [];
+function pollInput() {
+  const gp = navigator.getGamepads ? Array.from(navigator.getGamepads()).find(Boolean) : null;
+  const gpButtons = gp ? gp.buttons.map(b => !!b && b.pressed) : [];
+  const gpEdge = (i) => !!gpButtons[i] && !prevGpButtons[i];
+  const kEdge = (c) => !!keyEdges[c];
+  const kDown = (c) => !!keys[c];
+  let axX = 0, axY = 0;
+  if (gp) {
+    axX = Math.abs(gp.axes[0] || 0) > 0.15 ? gp.axes[0] : 0;
+    axY = Math.abs(gp.axes[1] || 0) > 0.15 ? gp.axes[1] : 0;
+  }
+  const keyX = (kDown('KeyD') || kDown('ArrowRight') ? 1 : 0) - (kDown('KeyA') || kDown('ArrowLeft') ? 1 : 0);
+  const keyY = (kDown('KeyS') || kDown('ArrowDown') ? 1 : 0) - (kDown('KeyW') || kDown('ArrowUp') ? 1 : 0);
+  input = {
+    moveX: keyX || axX,
+    moveY: keyY || axY,
+    sprint: kDown('ShiftLeft') || kDown('ShiftRight') || (gp && (gp.buttons[10]?.pressed || false)),
+    menuUp: kEdge('ArrowUp') || kEdge('KeyW') || gpEdge(12),
+    menuDown: kEdge('ArrowDown') || kEdge('KeyS') || gpEdge(13),
+    menuLeft: kEdge('ArrowLeft') || kEdge('KeyA') || gpEdge(14),
+    menuRight: kEdge('ArrowRight') || kEdge('KeyD') || gpEdge(15),
+    confirm: kEdge('Enter') || kEdge('Space') || gpEdge(0),
+    cancel: kEdge('Escape') || gpEdge(1),
+    attack: kEdge('KeyJ') || kEdge('Space') || gpEdge(0) || gpEdge(7),
+    attackHeld: kDown('KeyJ') || kDown('Space') || (gp && ((gp.buttons[0]?.pressed || false) || (gp.buttons[7]?.pressed || false))),
+    dodge: kEdge('KeyK') || gpEdge(1),
+    tame: kEdge('KeyE') || gpEdge(2),
+    interact: kEdge('KeyF') || kEdge('Enter') || gpEdge(2),
+    summon: kEdge('KeyR') || gpEdge(3),
+    pause: kEdge('Escape') || kEdge('KeyP') || gpEdge(9),
+    map: kEdge('KeyM') || gpEdge(8),
+    journal: kEdge('KeyC') || kEdge('Tab') || gpEdge(12),
+    journalKey: kEdge('KeyC') || kEdge('Tab'),
+    slotPrev: kEdge('KeyQ') || gpEdge(4),
+    slotNext: kEdge('KeyL') || gpEdge(5),
+    useSupply: kEdge('KeyH') || gpEdge(13),
+    digit: null,
+    gamepadName: gp ? gp.id : ''
+  };
+  for (let i=1; i<=7; i++) if (kEdge('Digit'+i)) input.digit = i-1;
+  prevGpButtons = gpButtons;
+  for (const k of Object.keys(keyEdges)) delete keyEdges[k];
+}
+
+function setScreen(s) { screen = s; menuIndex = 0; }
+const rnd = (a,b) => a + Math.random() * (b-a);
+const rndi = (a,b) => Math.floor(rnd(a,b+1));
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const dist = (a,b,c,d) => Math.hypot(a-c,b-d);
+const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+const hasSave = () => !!localStorage.getItem(SAVE_KEY);
+const allModules = () => game && game.modules.heat && game.modules.nival && game.modules.void && game.modules.cosmic;
+
+function log(msg, important=false) {
+  if (!game) return;
+  game.log.unshift({msg, t: important ? 8 : 5});
+  if (game.log.length > 8) game.log.pop();
+}
+function notify(msg, t=3) { notifications.push({msg, t}); }
+
+function ensureLabDefaults() {
+  if (!game) return;
+  if (!Array.isArray(game.labMessages)) game.labMessages = [];
+  if (!Array.isArray(game.labBreakthroughs)) game.labBreakthroughs = [];
+  if (!Array.isArray(game.labSpecimens)) game.labSpecimens = [];
+  if (typeof game.peopleSaved !== 'number') game.peopleSaved = 0;
+  if (typeof game.labVisitCount !== 'number') game.labVisitCount = 0;
+  if (typeof game.lastLabReportCaptureCount !== 'number') game.lastLabReportCaptureCount = 0;
+  if (typeof game.lastLabReportSpecimenCount !== 'number') game.lastLabReportSpecimenCount = 0;
+}
+function labSpecimensAll() { ensureLabDefaults(); return game?.labSpecimens || []; }
+function labTypeCounts() {
+  const counts = {};
+  for (const m of labSpecimensAll()) {
+    const type = m.element || 'unknown';
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  if (game?.bossTamed) counts.fusion = (counts.fusion || 0) + 1;
+  return counts;
+}
+function labPeopleSavedEstimate() {
+  ensureLabDefaults();
+  const reserve = labSpecimensAll().length;
+  const total = game.totalCaptured || 0;
+  const unique = Object.keys(labTypeCounts()).length;
+  const breakthroughCount = (game.labBreakthroughs || []).length;
+  return Math.floor(reserve*42 + total*9 + unique*55 + breakthroughCount*95 + (game.bossTamed?650:0) + Math.floor((game.research||0)*0.4));
+}
+function labMilestoneDefinitions() {
+  const reserve = labSpecimensAll().length;
+  const counts = labTypeCounts();
+  return [
+    {id:'first_specimen', title:'Sterile Habitat Protocol', unlocked: reserve>=1, speaker:'Dr. Ilyana Valez', role:'Brace Systems', body:'First reserve specimen stabilized. The lab can now build safer habitats so extra tamed monsters do not need lethal testing.'},
+    {id:'reserve_3', title:'Brace Recovery Upgrade', unlocked: reserve>=3, speaker:'Dr. Ilyana Valez', role:'Brace Systems', body:'Three reserve signatures compared. Bracelet recovery math improved; partners can reform with less stress after being defeated.'},
+    {id:'reserve_5', title:'Fever Regulation Trial', unlocked: reserve>=5, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Five reserve specimens studied. Heat and nival samples are helping model fever control and inflammation response.'},
+    {id:'reserve_8', title:'Bio-Radiation Countermeasure', unlocked: reserve>=8, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Eight reserve specimens catalogued. Void and cosmic compounds are now being tested against radiation damage and unstable cell mutation.'},
+    {id:'reserve_12', title:'Emergency Antidote Fabricator', unlocked: reserve>=12, speaker:'Chief Ortega', role:'Containment', body:'Twelve reserve specimens secured. Field antidote fabrication can now use live habitat data instead of dangerous guesses.'},
+    {id:'reserve_18', title:'Adaptive Tissue Repair Model', unlocked: reserve>=18, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Eighteen reserve specimens studied. The lab created an adaptive tissue-repair model for burns, infections, and shock injuries.'},
+    {id:'heat_gene', title:'Heat Gene Fever Control', unlocked: (counts.heat||0)>=1, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Heat-type DNA isolated. It helps regulate fever spikes without destroying healthy tissue.'},
+    {id:'nival_gene', title:'Nival-Tide Inflammation Control', unlocked: (counts.nival||0)>=1, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Nival-Tide tissue mapped. Cold-biome enzymes show promise for slowing inflammation and preserving organs.'},
+    {id:'void_gene', title:'Void Organ Radiation Absorption', unlocked: (counts.void||0)>=1, speaker:'Dr. Ilyana Valez', role:'Brace Systems', body:'Void organ pulses measured. The lab can now dampen radiation and gravity-stress effects around patients and habitats.'},
+    {id:'cosmic_gene', title:'Cosmic Cell Repair Mapping', unlocked: (counts.cosmic||0)>=1, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Cosmic cells mapped. Light-reactive repair behavior unlocked a new diagnostic path for damaged tissue.'},
+    {id:'toxic_gene', title:'Toxin Antidote Library', unlocked: (counts.toxic||0)>=1, speaker:'Chief Ortega', role:'Containment', body:'Toxic specimen venom catalogued. The antidote library expanded for island infections and poison wounds.'},
+    {id:'storm_gene', title:'Neuro-Electric Signal Therapy', unlocked: (counts.storm||0)>=1, speaker:'Dr. Ilyana Valez', role:'Brace Systems', body:'Storm bio-electric organs scanned. Signal therapy advanced for nerve damage and brace response timing.'},
+    {id:'alloy_gene', title:'Alloy Bone-Reinforcement Study', unlocked: (counts.alloy||0)>=1, speaker:'Dr. Elise Rowan', role:'Cure Research', body:'Alloy-type plates analyzed. Bone repair and protective tissue reinforcement studies advanced.'},
+    {id:'fusion_gene', title:'Mixed-State Containment', unlocked: (counts.fusion||0)>=1 || game.bossTamed, speaker:'Director Sato', role:'Genova Lab Command', body:'Fusion-state data confirmed. Nexarion accommodation protocols can support mixed powers without exposing civilians.'}
+  ];
+}
+function enqueueLabMessage(speaker, role, text, important=false) {
+  ensureLabDefaults();
+  const key = `${speaker}|${role}|${text}`;
+  if (game.labMessages.some(m => m.key === key)) return;
+  game.labMessages.push({ id:'lab-msg-'+Date.now()+'-'+Math.random().toString(36).slice(2,7), key, speaker, role, text, important, day: game.day || 1, visit: game.labVisitCount || 0 });
+  if (game.labMessages.length > 140) game.labMessages.splice(0, game.labMessages.length-140);
+}
+function refreshLabResearch(makeArrival=false) {
+  ensureLabDefaults();
+  const beforeSaved = game.peopleSaved || 0;
+  const existing = new Set((game.labBreakthroughs || []).map(b => b.id || b));
+  for (const m of labMilestoneDefinitions()) {
+    if (m.unlocked && !existing.has(m.id)) {
+      const rec = { id:m.id, title:m.title, body:m.body, speaker:m.speaker, role:m.role, day:game.day || 1 };
+      game.labBreakthroughs.push(rec);
+      enqueueLabMessage(m.speaker, m.role, `Research advance unlocked: ${m.title}. ${m.body}`, true);
+    }
+  }
+  const afterSaved = Math.max(beforeSaved, labPeopleSavedEstimate());
+  game.peopleSaved = afterSaved;
+  if (makeArrival) {
+    const reserve = labSpecimensAll().length;
+    const total = game.totalCaptured || 0;
+    if (reserve !== game.lastLabReportSpecimenCount || total !== game.lastLabReportCaptureCount || afterSaved !== beforeSaved) {
+      enqueueLabMessage('A.R.K. Lab Console', 'Arrival Summary', `New intake processed. Reserve specimens: ${reserve}. Total tamed: ${total}. Estimated people helped by current treatments: ${afterSaved}.`, true);
+    }
+    labBriefingQueue = makeLabArrivalBriefing(beforeSaved, afterSaved);
+    labBriefingIndex = 0;
+    game.lastLabReportSpecimenCount = reserve;
+    game.lastLabReportCaptureCount = total;
+  }
+}
+function makeLabArrivalBriefing(beforeSaved=0, afterSaved=null) {
+  ensureLabDefaults();
+  const reserve = labSpecimensAll().length;
+  const total = game.totalCaptured || 0;
+  const teamCount = (game.team || []).length;
+  const counts = labTypeCounts();
+  const types = Object.entries(counts).map(([k,v]) => `${k}:${v}`).join('  ') || 'none yet';
+  const saved = afterSaved ?? (game.peopleSaved || 0);
+  const gainedSaved = Math.max(0, saved - (beforeSaved || 0));
+  const latest = (game.labMessages || []).slice(-3).reverse();
+  const intro = [
+    {speaker:'Dr. Ilyana Valez', role:'Brace Systems', text:`Welcome back. Decontamination is clean. Bracelet telemetry shows ${teamCount}/7 active partners and ${reserve} reserve specimens in Genova Lab containment.`},
+    {speaker:'Dr. Elise Rowan', role:'Cure Research', text:`Your captures are not just trophies. Current treatment models estimate ${saved} people helped${gainedSaved ? `, +${gainedSaved} since your last lab return` : ''}. Send more varied monsters to increase this number.`},
+    {speaker:'Chief Ortega', role:'Containment', text:`Every extra monster you send shows type, level, form, DNA code, bond, and stress data on the lab console. Higher-level monsters create stronger research results.`},
+    {speaker:'A.R.K. System', role:'Specimen Database', text:`Type coverage: ${types}. Open the Research Console to scroll scientist messages, advances, and every reserve monster you delivered.`}
+  ];
+  if (!reserve) intro.push({speaker:'Dr. Elise Rowan', role:'Cure Research', text:'No reserve specimens are stored yet. Fill your seven slots, then tame more monsters so the extras transfer to the lab for important studies.'});
+  for (const msg of latest) intro.push({speaker: msg.speaker, role: msg.role, text: msg.text});
+  return intro;
+}
+function openLabConsole() {
+  if (!game) return;
+  refreshLabResearch(false);
+  labConsoleIndex = 0;
+  setScreen('labConsole');
+}
+function labConsoleRows() {
+  ensureLabDefaults();
+  const rows = [];
+  const reserve = labSpecimensAll();
+  const counts = labTypeCounts();
+  rows.push({kind:'summary', color:'#83dcff', title:'MISSION IMPACT SUMMARY', body:`People helped: ${game.peopleSaved || 0}. Reserve specimens: ${reserve.length}. Total tamed: ${game.totalCaptured || 0}. Research points: ${game.research || 0}. Breakthroughs: ${(game.labBreakthroughs||[]).length}.`});
+  rows.push({kind:'summary', color:'#ffd985', title:'TYPE COVERAGE', body:Object.entries(counts).map(([k,v]) => `${k.toUpperCase()} ${v}`).join('   ') || 'No reserve types catalogued yet.'});
+  rows.push({kind:'header', color:'#9aff7d', title:'SCIENTIST MESSAGE FEED', body:'Newest updates from Genova Lab scientists.'});
+  const msgs = (game.labMessages || []).slice().reverse();
+  if (!msgs.length) rows.push({kind:'empty', color:'#cccccc', title:'No scientist messages yet', body:'Return from an island with extra tamed monsters to generate lab updates.'});
+  for (const msg of msgs) rows.push({kind:'message', color:msg.important?'#ffd985':'#e9f4ff', title:`${msg.speaker} — ${msg.role}`, body:msg.text});
+  rows.push({kind:'header', color:'#83dcff', title:'RESEARCH ADVANCES UNLOCKED', body:'Permanent progress created from your monster captures.'});
+  if (!(game.labBreakthroughs||[]).length) rows.push({kind:'empty', color:'#cccccc', title:'No advances unlocked yet', body:'Send reserve monsters to the lab to unlock cures, suit upgrades, and safer habitats.'});
+  for (const b of (game.labBreakthroughs || [])) rows.push({kind:'advance', color:'#9aff7d', title:b.title, body:b.body});
+  rows.push({kind:'header', color:'#f6d66c', title:'RESERVE SPECIMEN DATABASE', body:'Monsters sent to the lab because your seven bracelet slots were full.'});
+  if (!reserve.length) rows.push({kind:'empty', color:'#cccccc', title:'Reserve database empty', body:'Tame more than seven monsters to send extras to the lab.'});
+  reserve.forEach((m,i) => rows.push({kind:'specimen', color:STATE_COLORS[m.element]||'#fff', mon:m, title:`${i+1}. ${m.name}`, body:`Type ${m.element || 'unknown'} | Level ${m.level || 1} | Form ${m.form || 'Prime'} | DNA ${m.dna || 'unknown'} | Bond ${Math.round(m.bond||0)} | Skills ${(m.skills||[]).length || 0}`}));
+  return rows;
+}
+function updateLabBriefing() {
+  if (!labBriefingQueue.length) { setScreen('lab'); return; }
+  if (input.cancel || input.pause) { setScreen('lab'); saveGame(false); return; }
+  if (input.menuUp) labBriefingIndex = Math.max(0, labBriefingIndex - 1);
+  if (input.confirm || input.attack || input.menuDown || input.interact) {
+    labBriefingIndex++;
+    if (labBriefingIndex >= labBriefingQueue.length) { setScreen('lab'); saveGame(false); }
+  }
+}
+function updateLabConsole() {
+  const rows = labConsoleRows();
+  labConsoleIndex = clamp(labConsoleIndex, 0, Math.max(0, rows.length-1));
+  if (input.cancel || input.pause) { setScreen('lab'); return; }
+  if (input.menuUp) labConsoleIndex = Math.max(0, labConsoleIndex - 1);
+  if (input.menuDown || input.confirm || input.attack || input.interact) labConsoleIndex = Math.min(rows.length-1, labConsoleIndex + 1);
+  if (input.menuLeft) labConsoleIndex = Math.max(0, labConsoleIndex - 6);
+  if (input.menuRight) labConsoleIndex = Math.min(rows.length-1, labConsoleIndex + 6);
+}
+function shortText(text, max=94) {
+  const s = String(text || '');
+  return s.length > max ? s.slice(0, max-1) + '…' : s;
+}
+
+function makePlayer() {
+  return {
+    x: 190, y: 190, hp: 100, stamina: 100, hunger: 100, hydration: 100,
+    temperature: 37, infection: 0, suit: 100, deviceHeat: 0, supplies: 3,
+    invuln: 0, dodgeT: 0, attackCooldown: 0, speed: 210, faceX: 1, faceY: 0,
+    rescueBeacon: true,
+    coins: 0, relics: 0, braceletLevel: 1, braceletXp: 0,
+    braceletCharge: 0, braceletCharging: false, lastBraceletAttack: '',
+    weapon: { name:'VX-46 Stabilizer Carbine', power:16, range:235, overheat:16, mode:'stabilize' }
+  };
+}
+
+function newGame() {
+  selectedSlot = 0; activeSummon = null; pulses = []; particles = []; notifications = [];
+  player = makePlayer();
+  game = {
+    version: 8,
+    worldW: 3600, worldH: 2550,
+    islandName: randomIslandName(),
+    islandRank: 1,
+    day: 1,
+    time: 0,
+    team: [],
+    labSpecimens: [],
+    labMessages: [],
+    labBreakthroughs: [],
+    peopleSaved: 0,
+    labVisitCount: 0,
+    lastLabReportCaptureCount: 0,
+    lastLabReportSpecimenCount: 0,
+    research: 0,
+    tournamentRank: 0,
+    totalCaptured: 0,
+    missionTamed: 0,
+    bossTamed: false,
+    modules: { heat:false, nival:false, void:false, cosmic:false },
+    monsters: [], hazards: [], crates: [], ruins: [], loreNodes: [], loreArchive: [],
+    boss: null,
+    log: []
+  };
+  generateIsland(true);
+  log('Mission start: survive the abandoned island, tame 7 specimens, build the 4-core suit, tame Nexarion, then escape.', true);
+  saveGame(false);
+  setScreen('play');
+}
+
+function continueGame() {
+  const raw = localStorage.getItem(SAVE_KEY);
+  if (!raw) { notify('No save found.'); return; }
+  try {
+    const data = JSON.parse(raw);
+    game = data.game; player = data.player;
+    ensureGameDefaults();
+    selectedSlot = data.selectedSlot || 0;
+    activeSummon = null; pulses = []; particles = []; notifications = [];
+    setScreen(data.screen === 'lab' ? 'lab' : 'play');
+    log('Recovery Beacon loaded your last saved progress.', true);
+  } catch (e) {
+    notify('Save is damaged. Starting a new expedition.');
+    newGame();
+  }
+}
+
+function saveGame(announce=true) {
+  if (!game || !player) return;
+  const data = {game, player, selectedSlot, screen: screen === 'lab' ? 'lab' : 'play'};
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  if (announce) log('Progress saved by Recovery Beacon.', true);
+}
+
+function randomIslandName() {
+  return pick(['Neralis','Obsidian Veil','Marex-9','Halo Reef','Topping Atoll','Kuroshima','Eclipse Cay','Vita Rook']) + ' Island';
+}
+const BIOMES = [
+  {name:'Rainforest Gold Ruins', weather:'RAIN', ground1:'#1c2b2d', ground2:'#10191a', sky1:'#15304b', sky2:'#071018', accent:'#caa465', fog:'rgba(90,130,150,.10)'},
+  {name:'Ashfall Suburb', weather:'ASH', ground1:'#2a221f', ground2:'#111014', sky1:'#351d1c', sky2:'#08080d', accent:'#ff7d4a', fog:'rgba(255,110,70,.08)'},
+  {name:'Frozen Harbor Homes', weather:'SNOW', ground1:'#1b2c32', ground2:'#0b151a', sky1:'#26445a', sky2:'#081118', accent:'#8de8ff', fog:'rgba(150,220,255,.09)'},
+  {name:'Voidlight Village', weather:'VOID FOG', ground1:'#191728', ground2:'#090914', sky1:'#20183b', sky2:'#06060f', accent:'#a76dff', fog:'rgba(160,80,255,.10)'},
+  {name:'Cosmic Overgrowth', weather:'METEOR MIST', ground1:'#14282d', ground2:'#081216', sky1:'#172550', sky2:'#07111f', accent:'#ffe37a', fog:'rgba(255,230,120,.08)'}
+];
+function makeBiome(first=false) { const b = first ? BIOMES[0] : pick(BIOMES); return {...b, seed:rndi(10000,99999), weather: pick([b.weather, 'RAIN', 'CLOUDY', 'STORM'])}; }
+function makeHome(x,y,i) {
+  return { id:'home-'+i, x, y, w:rnd(86,150), h:rnd(70,130), rot:rnd(-.25,.25), looted:false,
+    door:pick(['front','side']), roof:pick(['broken tile','collapsed metal','gold-trim slab']),
+    texture:pick(['cracked plaster','burned wallpaper','moldy concrete','torn island map','biohazard wallpaper']),
+    cracks:Array.from({length:5},()=>[rnd(-.45,.45),rnd(-.35,.35),rnd(.15,.4),rnd(.05,.3)]), windows:rndi(2,4) };
+}
+function ensureEconomyDefaults() {
+  if (player) {
+    if (player.coins === undefined) player.coins = 0;
+    if (player.relics === undefined) player.relics = 0;
+    if (player.braceletLevel === undefined) player.braceletLevel = 1;
+    if (player.braceletXp === undefined) player.braceletXp = 0;
+    if (player.braceletCharge === undefined) player.braceletCharge = 0;
+    if (player.braceletCharging === undefined) player.braceletCharging = false;
+    if (player.lastBraceletAttack === undefined) player.lastBraceletAttack = '';
+    if (!player.weapon) player.weapon = { name:'VX-46 Stabilizer Carbine', power:16, range:235, overheat:16, mode:'stabilize' };
+  }
+  if (game) {
+    if (!game.biome) game.biome = makeBiome((game.islandRank||1) === 1);
+    if (!Array.isArray(game.homes)) game.homes = [];
+  }
+}
+function braceletXpTarget() { return 80 + (player.braceletLevel||1)*35; }
+function braceletUpgradeCost() { const lvl=player.braceletLevel||1; return {coins:45+lvl*30, relics:Math.max(1, Math.floor(lvl/3)+1)}; }
+function braceletAttackProfile(charged=false) {
+  const lvl=player.braceletLevel||1;
+  let name='Stabilizer Bolt', color='#d9f1ff', power=12+lvl*2.4, range=235+lvl*6, heat=9+Math.min(lvl,18)*.6;
+  if(lvl>=3){name='Heat Lance';color='#ff7d4a';power+=8;}
+  if(lvl>=5){name='Void Piercer';color='#b06dff';power+=10;}
+  if(lvl>=8){name='Cosmic Rail';color='#ffe37a';power+=12;}
+  if(lvl>=12){name='Equinox Cascade';color='#ffffff';power+=18;}
+  if(charged){name='CHARGED '+name+' Blaster';power*=2.6;range+=135+lvl*8;heat+=24;}
+  return {name,color,power,range,heat};
+}
+function gainBraceletXp(amount, reason='field use') {
+  ensureEconomyDefaults(); player.braceletXp += amount;
+  if (player.braceletXp >= braceletXpTarget()) log('Bracelet has enough sync data for an upgrade. Use coins/relics at the lab.', true);
+}
+function upgradeBracelet() {
+  ensureEconomyDefaults(); const cost=braceletUpgradeCost();
+  if(player.coins<cost.coins||player.relics<cost.relics){
+    lastLabMessage = `Bracelet upgrade needs ${cost.coins} coins and ${cost.relics} relics. You have ${player.coins} coins and ${player.relics} relics. Search broken homes, caches, modules, and tame monsters.`;
+    return;
+  }
+  player.coins-=cost.coins; player.relics-=cost.relics; player.braceletLevel+=1;
+  player.braceletXp=Math.max(0, player.braceletXp-braceletXpTarget());
+  player.weapon.power=(player.weapon.power||16)+2; player.weapon.range=(player.weapon.range||235)+6; player.weapon.overheat=Math.max(6,(player.weapon.overheat||16)-.4);
+  const profile=braceletAttackProfile(false);
+  lastLabMessage=`Bracelet evolved to Level ${player.braceletLevel}. New attack profile: ${profile.name}. Tap for normal shots; hold and release for charged Apex blaster shots.`;
+  log(lastLabMessage,true); saveGame(false);
+}
+function updateBraceletCharge(dt) {
+  ensureEconomyDefaults();
+  if (input.attackHeld) {
+    player.braceletCharging=true;
+    player.braceletCharge=clamp((player.braceletCharge||0)+dt*(70+(player.braceletLevel||1)*6),0,100);
+    if(Math.random()<dt*5) spawnParticles(player.x, player.y, braceletAttackProfile(true).color, 1);
+  } else if ((player.braceletCharge||0)>0) {
+    const charged = player.braceletCharge >= 45;
+    commandAttack(charged, player.braceletCharge);
+    player.braceletCharge=0; player.braceletCharging=false;
+  }
+}
+function extractionUnlocked() { return allModules() && game && game.bossTamed && (game.missionTamed || 0) >= 7; }
+
+
+function generateIsland(first=false) {
+  game.worldW = 3600 + (game.islandRank-1)*250;
+  game.worldH = 2550 + (game.islandRank-1)*180;
+  game.islandName = first ? 'Neralis Island' : randomIslandName();
+  game.biome = makeBiome(first);
+  game.homes = [];
+  game.missionTamed = 0;
+  game.bossTamed = false;
+  game.modules = { heat:false, nival:false, void:false, cosmic:false };
+  if (!game.loreArchive) game.loreArchive = [];
+  game.hazards = []; game.crates = []; game.monsters = []; game.ruins = []; game.homes = []; game.loreNodes = []; game.log = [];
+  player.x = 190; player.y = 190; player.hp = 100; player.stamina = 100; player.hunger = 100; player.hydration = 100; player.temperature = 37; player.infection = 0; player.suit = 100; player.deviceHeat = 0; player.supplies = Math.max(player.supplies, 3);
+  activeSummon = null;
+
+  const hazardTypes = ['heat','nival','void','cosmic'];
+  for (let i=0;i<18 + game.islandRank*2;i++) {
+    const type = pick(hazardTypes);
+    game.hazards.push({x:rnd(450, game.worldW-300), y:rnd(330, game.worldH-280), r:rnd(120,260), type, pulse:rnd(0,TAU)});
+  }
+
+  const moduleData = [
+    ['heat','Heatwave Core', game.worldW-430, 380],
+    ['nival','Nival-Tide Seal', 520, game.worldH-420],
+    ['void','Void Dampener', game.worldW-620, game.worldH-460],
+    ['cosmic','Cosmic Halo Lens', game.worldW/2+200, game.worldH/2-200]
+  ];
+  for (const [module,name,x,y] of moduleData) game.crates.push({x,y,kind:'module',module,name,taken:false});
+  for (let i=0;i<32;i++) game.crates.push({x:rnd(240,game.worldW-180), y:rnd(240,game.worldH-180), kind: Math.random()<.7?'supply':'gene', name: Math.random()<.7?'Field Supply Cache':'Gene Sample Cache', taken:false});
+
+  for (let i=0;i<16;i++) {
+    game.ruins.push({x:rnd(350, game.worldW-350), y:rnd(350, game.worldH-350), w:rnd(90,230), h:rnd(60,180), rot:rnd(-.3,.3)});
+  }
+  generateLoreNodes(first);
+
+  const homeCount = 9 + game.islandRank*2;
+  for (let i=0;i<homeCount;i++) game.homes.push(makeHome(rnd(280, game.worldW-280), rnd(280, game.worldH-280), i));
+
+  const count = 24 + game.islandRank*4;
+  for (let i=0;i<count;i++) game.monsters.push(makeWildMonster(rnd(400,game.worldW-260), rnd(350,game.worldH-240), false));
+  // Easier early captures near spawn.
+  if (first) {
+    game.monsters.push(makeWildMonster(520, 315, true));
+    game.monsters.push(makeWildMonster(630, 440, true));
+  }
+  game.boss = makeBoss(game.worldW-500, game.worldH/2+120);
+}
+
+const FIRST_ISLAND_LORE = [
+  {
+    type:'diary',
+    title:'Field Diary 01 — Seven Slots',
+    author:'Dr. Ilyana Valez, Brace Systems',
+    text:'The Sevenbound Brace can hold only seven active signatures before the containment math becomes unstable. Extra tamed specimens must be sent to Genova Lab. That is not failure; reserve specimens may become the key to cures we could not create by normal medicine.',
+    clue:'Gameplay clue: keep your best 7 partners, but still tame extras for research rewards.'
+  },
+  {
+    type:'wall',
+    title:'Wall Verse — Psalm 23:4',
+    author:'Unknown hand carved into the west dorm wall',
+    verse:'Psalm 23:4',
+    text:'A Bible reference is scratched into the concrete beside a beacon symbol. Under it someone wrote: “Even in the valley, fear does not get the final command. Walk toward the light. Do not run blind.”',
+    clue:'Lore clue: wall verses mark places where survivors tried to guide later rescuers.'
+  },
+  {
+    type:'survivor',
+    title:'Last Note — Ward C Medicine Cache',
+    author:'Civilian evacuee, name unreadable',
+    text:'If anyone finds this, take the medicine cache from Ward C. The children needed it, but the evacuation boats never came back. The monsters are not demons. We made them hungry, immortal, and afraid.',
+    clue:'World clue: some civilian notes point toward supplies or medical story threads.'
+  },
+  {
+    type:'diary',
+    title:'Containment Diary — Nexarion Stress',
+    author:'Dr. Mateo Shin, Behavioral Genetics',
+    text:'Nexarion does not stay in one state. Heatwave, Nival-Tide, Void, and Cosmic signatures are all present. Stress does not merely anger it; stress mixes the states. A tamer without the four-core suit will be erased by the environment before the brace can finish bonding.',
+    clue:'Boss clue: collect all four suit modules before attempting Equinox Bond.'
+  },
+  {
+    type:'wall',
+    title:'Wall Verse — Isaiah 41:10',
+    author:'Security Officer Mara Pell',
+    verse:'Isaiah 41:10',
+    text:'The verse reference is painted above a broken airlock. Beside it: “Do not fear. Strength first, aim second, breathe third. If the brace overheats, wait. Panic feeds the island.”',
+    clue:'Gameplay clue: retreating and cooling the brace is sometimes the correct move.'
+  },
+  {
+    type:'survivor',
+    title:'Last Note — The Quiet Room',
+    author:'Lab assistant Ciro Menendez',
+    text:'We sealed the quiet room because the smaller monsters copied every sound we made. I am leaving the access code with the wall verse marks. If the next team arrives, please tell my mother I kept the lights on until the end.',
+    clue:'Story clue: later islands can use wall marks as keys to locked ruins.'
+  },
+  {
+    type:'diary',
+    title:'Research Diary — Cure Potential',
+    author:'Dr. Elise Rowan, Viral Countermeasure Team',
+    text:'Heat genes regulate fever spikes. Nival tissue slows inflammation. Void organs absorb radiation. Cosmic cells repair light-damaged tissue. If we survive long enough to study them safely, these monsters can save people.',
+    clue:'Research clue: non-lethal lab study is the main reason to tame monsters you do not keep.'
+  },
+  {
+    type:'wall',
+    title:'Wall Verse — John 1:5',
+    author:'Unknown survivor near the generator hall',
+    verse:'John 1:5',
+    text:'A Bible reference about light in darkness is written in charcoal. Below it: “The cosmic form follows light. Use shadows when you need to heal; use light when you need to lure it away.”',
+    clue:'Boss clue: future versions can use light and shadow to control cosmic-state behavior.'
+  }
+];
+
+const PROCEDURAL_LORE_BANK = {
+  diary: [
+    ['Field Diary — Brace Fever', 'Dr. Anika Sol', 'Brace heat rises faster near void nests. We thought it was a hardware flaw, but the device is reacting to gravity pulses inside the monster organs. Cooling the brace before taming is not optional.'],
+    ['Research Diary — Immortal Tissue', 'Dr. Omar Keene', 'Modified cells do not accept a final growth limit. Every specimen keeps adapting to weather, wounds, bond stress, and diet. The lab must treat evolution like a living weather report, not a level chart.'],
+    ['Containment Diary — Habitat First', 'Dr. Hana Bell', 'A tamed monster is not safe just because the brace owns its signature. Habitat, food, and calm routines matter. A bad keeper creates a dangerous evolution path.']
+  ],
+  wall: [
+    ['Wall Verse — Psalm 91', 'Unknown survivor', 'The reference is painted above a cot. Beside it: “Shelter is not a place here. Shelter is movement, discipline, and staying close to the beacon path.”', 'Psalm 91'],
+    ['Wall Verse — Matthew 5:9', 'Evacuation chaplain note', 'The reference is written next to a broken tranquilizer case. Beside it: “Blessed are the peacemakers. Do not kill what can still be calmed.”', 'Matthew 5:9'],
+    ['Wall Verse — Romans 8:38-39', 'Unknown survivor', 'The reference is carved into the observation glass. Beside it: “No depth, no darkness, no experiment should separate us from mercy.”', 'Romans 8:38-39']
+  ],
+  survivor: [
+    ['Last Note — Dock Signal', 'Island worker', 'The dock beacon blinked three times, then stopped. If the sea gate still works, aim for the green extraction circle and do not answer voices from the fog.'],
+    ['Last Note — Cafeteria Floor', 'Civilian volunteer', 'I left food packets under the collapsed table. The small blue monster watched me and did not attack until the alarm screamed again. Maybe calm is a language.'],
+    ['Last Note — Service Tunnel', 'Maintenance chief', 'The tunnel shakes when Nexarion changes state. Count the pulses. Five means heat, seven means void, and the long silent one means run.']
+  ]
+};
+
+function ensureGameDefaults() {
+  if (!game) return;
+  game.version = Math.max(game.version || 1, 8);
+  if (!Array.isArray(game.loreArchive)) game.loreArchive = [];
+  if (!Array.isArray(game.labMessages)) game.labMessages = [];
+  if (!Array.isArray(game.homes)) game.homes = [];
+  if (!game.biome) game.biome = makeBiome((game.islandRank||1) === 1);
+  ensureEconomyDefaults();
+  if (!Array.isArray(game.loreNodes) || game.loreNodes.length === 0) {
+    game.loreNodes = [];
+    if (Array.isArray(game.ruins) && game.ruins.length && typeof generateLoreNodes === 'function') generateLoreNodes(game.islandRank === 1);
+  }
+}
+
+function normalizeTamedMonster(m) {
+  if (!m) return;
+  m.maxHp = Number.isFinite(m.maxHp) && m.maxHp > 0 ? m.maxHp : Math.max(45, m.hp || 60);
+  m.hp = Number.isFinite(m.hp) ? clamp(m.hp, 0, m.maxHp) : m.maxHp;
+  m.recovery = Number.isFinite(m.recovery) ? Math.max(0, m.recovery) : 0;
+  m.level = Number.isFinite(m.level) ? m.level : 1;
+  m.power = Number.isFinite(m.power) ? m.power : 12;
+  m.element = m.element || 'neutral';
+  m.sprite = m.sprite || spriteFor(m.element);
+  m.family = m.family || 'Chimera';
+  m.form = m.form || 'Prime';
+  if (!Array.isArray(m.skills)) m.skills = monsterSkillsFor(m.element, m.level);
+  for (const s of m.skills) if (!Number.isFinite(s.currentCd)) s.currentCd = 0;
+  m.skillMemory = Number.isFinite(m.skillMemory) ? m.skillMemory : 0;
+  m.nextSkillAt = Number.isFinite(m.nextSkillAt) ? m.nextSkillAt : 3;
+  m.adaptiveSkillCount = Number.isFinite(m.adaptiveSkillCount) ? m.adaptiveSkillCount : 0;
+}
+
+function braceStatusText(mon) {
+  if (!mon) return 'Empty';
+  normalizeTamedMonster(mon);
+  if (mon.recovery > 0) return `Recovering ${Math.ceil(mon.recovery)}s`;
+  if (mon.hp <= 0) return 'Reforming';
+  if (mon.hp < mon.maxHp) return `Brace healing ${Math.ceil(mon.hp/mon.maxHp*100)}%`;
+  return 'Ready';
+}
+
+function updateBraceletRecovery(dt) {
+  if (!game || !Array.isArray(game.team)) return;
+  for (const m of game.team) {
+    normalizeTamedMonster(m);
+    updateSkillCooldowns(m, dt);
+    const isActive = activeSummon && activeSummon.mon === m;
+    if (isActive) continue;
+
+    if (m.hp < m.maxHp) m.braceFullNotified = false;
+
+    if (m.recovery > 0) {
+      const before = m.recovery;
+      m.recovery = Math.max(0, m.recovery - dt);
+      if (before > 0 && m.recovery <= 0) {
+        m.hp = Math.max(m.hp || 0, m.maxHp * 0.35);
+        m.braceFullNotified = false;
+        log(`${m.name} recovered inside the bracelet and can be summoned again.`, true);
+      }
+      continue;
+    }
+
+    if (m.hp <= 0) {
+      m.recovery = assistMode ? 8 : 12;
+      m.braceFullNotified = false;
+      continue;
+    }
+
+    if (m.hp < m.maxHp) {
+      const regenRate = Math.max(3, m.maxHp * (assistMode ? 0.10 : 0.055));
+      m.hp = clamp(m.hp + regenRate * dt, 0, m.maxHp);
+      if (m.hp >= m.maxHp && !m.braceFullNotified) {
+        m.hp = m.maxHp;
+        m.braceFullNotified = true;
+        log(`${m.name} is fully restored inside the bracelet.`, true);
+      }
+    }
+  }
+}
+
+function generateLoreNodes(first=false) {
+  if (!game) return;
+  const templates = first ? FIRST_ISLAND_LORE : makeProceduralLoreSet();
+  game.loreNodes = templates.map((t, i) => {
+    const r = game.ruins[i % Math.max(1, game.ruins.length)] || {x:rnd(400, game.worldW-400), y:rnd(350, game.worldH-350), w:120, h:90};
+    const angle = (i * 2.399) % TAU;
+    const x = clamp(r.x + Math.cos(angle) * (35 + (r.w||120)*0.35), 80, game.worldW-80);
+    const y = clamp(r.y + Math.sin(angle) * (35 + (r.h||90)*0.35), 80, game.worldH-80);
+    const id = loreId(t, i);
+    const old = (game.loreArchive || []).find(l => l.id === id);
+    return {...t, id, order:i, x, y, found: !!old};
+  });
+}
+
+function makeProceduralLoreSet() {
+  const island = game?.islandName || 'unknown island';
+  const rank = game?.islandRank || 1;
+  const set = [];
+  const d = pick(PROCEDURAL_LORE_BANK.diary);
+  set.push({type:'diary', title:d[0], author:d[1], text:`${d[2]} Location stamp: ${island}, expedition rank ${rank}.`, clue:'Lore clue: each island leaves research that explains hazards, behavior, or future upgrades.'});
+  const w = pick(PROCEDURAL_LORE_BANK.wall);
+  set.push({type:'wall', title:w[0], author:w[1], verse:w[3], text:w[2], clue:'Wall clue: Bible verse marks often point toward shelter, restraint, or the safest route.'});
+  const sv = pick(PROCEDURAL_LORE_BANK.survivor);
+  set.push({type:'survivor', title:sv[0], author:sv[1], text:sv[2], clue:'Survivor clue: last notes can reveal supply caches, monster behavior, or extraction hints.'});
+  const d2 = pick(PROCEDURAL_LORE_BANK.diary);
+  set.push({type:'diary', title:d2[0] + ' II', author:d2[1], text:`${d2[2]} Follow-up scan says the monsters here are not copies. Every DNA seed is unique.`, clue:'Generation clue: every wild monster is procedurally unique.'});
+  return set;
+}
+
+function loreId(t, i) {
+  const base = `${game.islandName}-${game.islandRank}-${i}-${t.title}`.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+  return base.slice(0,90);
+}
+
+function loreTypeLabel(type) {
+  return ({diary:'Scientist diary', wall:'Wall verse / inscription', survivor:'Last survivor note'})[type] || 'Lost record';
+}
+function loreColor(type) {
+  return ({diary:'#83dcff', wall:'#f6d66c', survivor:'#ff9b9b'})[type] || '#ffffff';
+}
+function collectedLore() {
+  return (game?.loreArchive || []).slice().sort((a,b) => (a.order ?? 999) - (b.order ?? 999));
+}
+function openJournal(from='play') {
+  if (!game) return;
+  journalReturnScreen = from;
+  loreIndex = clamp(loreIndex, 0, Math.max(0, collectedLore().length-1));
+  setScreen('journal');
+}
+function closeJournal() {
+  setScreen(journalReturnScreen === 'lab' ? 'lab' : journalReturnScreen === 'pause' ? 'pause' : 'play');
+}
+function nearestLoreNode(range=85) {
+  if (!game?.loreNodes) return null;
+  let best = null, bd = range;
+  for (const n of game.loreNodes) {
+    const d = dist(player.x, player.y, n.x, n.y);
+    if (d < bd) { best = n; bd = d; }
+  }
+  return best;
+}
+function interactWithLore() {
+  const node = nearestLoreNode();
+  if (!node) return false;
+  readLoreNode(node);
+  return true;
+}
+function readLoreNode(node) {
+  const gain = node.type === 'diary' ? 7 : node.type === 'wall' ? 5 : 6;
+  if (!node.found) {
+    node.found = true;
+    if (!game.loreArchive.some(l => l.id === node.id)) {
+      const {id,type,title,author,text,verse,clue,order} = node;
+      game.loreArchive.push({id,type,title,author,text,verse,clue,order, island:game.islandName, day:game.day});
+    }
+    game.research += gain;
+    log(`Lost record recovered: ${node.title}. Research +${gain}.`, true);
+    saveGame(false);
+  }
+  activeLore = {...node, island:game.islandName};
+  loreReturnScreen = 'play';
+  setScreen('loreRead');
+}
+function updateJournalMenu() {
+  const items = collectedLore();
+  if (input.cancel || input.pause || input.journalKey) { closeJournal(); return; }
+  if (!items.length) return;
+  if (input.menuUp) loreIndex = (loreIndex - 1 + items.length) % items.length;
+  if (input.menuDown) loreIndex = (loreIndex + 1) % items.length;
+  if (input.confirm || input.interact || input.attack) {
+    activeLore = {...items[loreIndex]};
+    loreReturnScreen = 'journal';
+    setScreen('loreRead');
+  }
+}
+function updateLoreRead() {
+  if (input.confirm || input.cancel || input.interact || input.tame || input.pause || input.journalKey) {
+    setScreen(loreReturnScreen === 'journal' ? 'journal' : 'play');
+  }
+}
+
+function makeWildMonster(x,y,easy=false) {
+  const element = easy ? pick(['nival','storm','toxic']) : pick(['heat','nival','void','cosmic','storm','toxic','alloy']);
+  const family = pick(MONSTER_FAMILIES);
+  const form = pick(FORM_NAMES);
+  const name = `${generateName()} ${family}`;
+  const lvl = easy ? 1 : rndi(1, 3 + game.islandRank*2);
+  const maxHp = easy ? rnd(38,55) : rnd(50,92) + lvl*8;
+  return {
+    id: cryptoRandomId(), x, y, vx:0, vy:0,
+    name, family, form, element, sprite: spriteFor(element),
+    level:lvl, hp:maxHp, maxHp, stress:rnd(10,40), bond:0,
+    speed: easy ? rnd(55,75) : rnd(65,115), power: rnd(7,15)+lvl*2,
+    radius: easy ? 31 : rnd(34,48), aggro:rnd(220,420), attackCd:0, damagedFlash:0,
+    temperament: easy ? 'curious' : pick(['aggressive','territorial','curious','unstable','hunter']),
+    dna: dnaCode(element), easy,
+    skills: monsterSkillsFor(element, lvl), skillMemory:0, nextSkillAt:3, adaptiveSkillCount:0
+  };
+}
+
+function makeBoss(x,y) {
+  return {
+    id:'boss-nexarion', x,y, name:'Nexarion Equinox', family:'Apex Chimera', form:'Equinox', element:'fusion', sprite:'equinox',
+    level:25, hp:640, maxHp:640, stress:60, power:32, speed:86, radius:88,
+    stateIndex:0, stateTimer:0, attackCd:0, damagedFlash:0,
+    states:['heat','nival','void','cosmic','fusion'], dna:'NX-EQX-0007',
+    skills: monsterSkillsFor('fusion', 25), skillMemory:0, nextSkillAt:2, adaptiveSkillCount:3
+  };
+}
+
+function spriteFor(element) {
+  if (element === 'heat') return 'heat';
+  if (element === 'void') return 'void';
+  if (element === 'cosmic' || element === 'nival') return 'cosmic';
+  return pick(['heat','void','cosmic']);
+}
+function dnaCode(element) { return element.slice(0,2).toUpperCase() + '-' + rndi(1000,9999) + '-' + pick(['A','B','C','X','Ω']); }
+function cryptoRandomId() { return 'm-' + Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-3); }
+function generateName() {
+  const a = ['Va','No','Axi','Kyr','Sol','Moro','Zy','Vel','Ra','Nyx','Halo','Tor','Lum','Iri','Xen'];
+  const b = ['ri','gon','ther','lith','vyr','mora','xis','kai','drin','nox','lune','tar','zun','rex'];
+  return pick(a)+pick(b);
+}
+
+const MONSTER_FAMILIES = ['Drake','Maw','Fang','Wyrm','Shell','Raptor','Golem','Lumen','Viper','Cub','Leviathan','Seraph'];
+const FORM_NAMES = ['Prime','Rogue','Titan','Wisp','Howler','Sentinel','Bloom','Abyssal','Solar','Lunar'];
+const SKILL_LIBRARY = {
+  neutral: [
+    {name:'Quick Bite', power:10, cd:0.9, color:'#ffffff'},
+    {name:'Dash Claw', power:12, cd:1.15, color:'#d4ecff'},
+    {name:'Brace Pulse', power:13, cd:1.2, color:'#8bd7ff'}
+  ],
+  heat: [
+    {name:'Ember Lash', power:14, cd:1.0, color:'#ff7d4a'},
+    {name:'Magma Burst', power:18, cd:1.45, color:'#ff5d2e'},
+    {name:'Solar Fang', power:20, cd:1.8, color:'#ffc16c'}
+  ],
+  nival: [
+    {name:'Frost Lance', power:14, cd:1.0, color:'#8de8ff'},
+    {name:'Tide Shear', power:18, cd:1.5, color:'#66d7ff'},
+    {name:'Glacier Halo', power:20, cd:1.8, color:'#c7f6ff'}
+  ],
+  void: [
+    {name:'Null Fang', power:14, cd:1.0, color:'#b06dff'},
+    {name:'Gravity Rip', power:18, cd:1.45, color:'#8e4cff'},
+    {name:'Abyss Nova', power:21, cd:1.95, color:'#d7a8ff'}
+  ],
+  cosmic: [
+    {name:'Star Pulse', power:14, cd:1.0, color:'#ffe37a'},
+    {name:'Comet Arc', power:18, cd:1.45, color:'#8dc3ff'},
+    {name:'Nebula Crown', power:21, cd:1.95, color:'#f3e8a5'}
+  ],
+  storm: [
+    {name:'Volt Peck', power:13, cd:0.95, color:'#cdf5ff'},
+    {name:'Thunder Drift', power:17, cd:1.35, color:'#9ee9ff'},
+    {name:'Tempest Coil', power:20, cd:1.8, color:'#7de5ff'}
+  ],
+  toxic: [
+    {name:'Venom Spit', power:13, cd:0.95, color:'#aef75a'},
+    {name:'Corrode Claw', power:17, cd:1.35, color:'#7de554'},
+    {name:'Spore Collapse', power:19, cd:1.75, color:'#d0ff88'}
+  ],
+  alloy: [
+    {name:'Steel Ram', power:14, cd:1.05, color:'#dbe0ea'},
+    {name:'Shatter Edge', power:18, cd:1.4, color:'#c3cad6'},
+    {name:'Bastion Crash', power:21, cd:1.95, color:'#f0f4ff'}
+  ],
+  fusion: [
+    {name:'Equinox Rupture', power:22, cd:1.15, color:'#ffffff'},
+    {name:'Halo Cataclysm', power:28, cd:1.85, color:'#f7dd89'},
+    {name:'Voidfire Crown', power:34, cd:2.4, color:'#ff9de1'}
+  ]
+};
+function monsterSkillsFor(element, level=1) {
+  const base = [...(SKILL_LIBRARY[element] || SKILL_LIBRARY.neutral), ...SKILL_LIBRARY.neutral];
+  const out = [];
+  while (out.length < 3 && base.length) {
+    const s = base.splice(Math.floor(Math.random()*base.length),1)[0];
+    out.push({...s, learnedAt:level, currentCd:0});
+  }
+  return out;
+}
+function makeAdaptiveSkill(mon) {
+  const n = Math.max(1, ((mon.adaptiveSkillCount||0)+1));
+  mon.adaptiveSkillCount = n;
+  const names = ['Eternal Shift','Limit Breaker','Bio Surge','Apex Spiral','Mythic Drive','Omega Bloom'];
+  return {
+    name: `${pick(names)} ${n}`,
+    power: 14 + n*2.2 + (mon.level||1)*0.35,
+    cd: Math.max(0.78, 1.65 - n*0.05),
+    color: STATE_COLORS[mon.element] || '#ffffff',
+    learnedAt: mon.level || 1,
+    currentCd: 0
+  };
+}
+function maybeLearnSkill(mon, reason='battle data') {
+  if (!mon.skills) mon.skills = monsterSkillsFor(mon.element, mon.level||1);
+  mon.skillMemory = (mon.skillMemory||0) + 1;
+  const threshold = mon.nextSkillAt || 3;
+  if (mon.skillMemory < threshold) return;
+  mon.skillMemory = 0;
+  mon.nextSkillAt = Math.min(8, threshold + 1);
+  const pool = [...(SKILL_LIBRARY[mon.element] || []), ...SKILL_LIBRARY.neutral];
+  const existing = new Set(mon.skills.map(s => s.name));
+  let candidate = pool.find(s => !existing.has(s.name));
+  if (!candidate) candidate = makeAdaptiveSkill(mon);
+  const learned = {...candidate, currentCd:0, learnedAt:mon.level||1};
+  mon.skills.push(learned);
+  mon.lastSkillEvent = `Learned ${learned.name} from ${reason}`;
+  log(`${mon.name} learned ${learned.name}. Skills can grow indefinitely.`, true);
+}
+function chooseAutoSkill(mon) {
+  if (!mon.skills || !mon.skills.length) mon.skills = monsterSkillsFor(mon.element, mon.level||1);
+  for (const s of mon.skills) s.currentCd = Math.max(0, (s.currentCd||0));
+  const ready = mon.skills.filter(s => (s.currentCd||0) <= 0);
+  if (ready.length) return ready.sort((a,b) => b.power - a.power)[Math.floor(Math.random()*Math.min(2, ready.length))];
+  return {name:'Auto Strike', power:10 + (mon.level||1)*0.6, cd:0.85, color:STATE_COLORS[mon.element] || '#fff', currentCd:0};
+}
+function updateSkillCooldowns(mon, dt) {
+  if (!mon.skills) return;
+  for (const s of mon.skills) s.currentCd = Math.max(0, (s.currentCd||0) - dt);
+}
+function battleReadyLabel(mon) {
+  if (!mon) return 'No active slot';
+  const ready = (mon.skills||[]).filter(s => (s.currentCd||0) <= 0).length;
+  return `${ready}/${(mon.skills||[]).length} skills ready`;
+}
+
+function update(dt) {
+  pollInput();
+  notifications.forEach(n => n.t -= dt); notifications = notifications.filter(n => n.t > 0);
+  if (game) game.log.forEach(l => l.t -= dt), game.log = game.log.filter(l => l.t > 0);
+  if (screen === 'play') updatePlay(dt);
+  else if (screen === 'title') updateMenu(titleMenu());
+  else if (screen === 'pause') updateMenu(pauseMenu());
+  else if (screen === 'controls') updateControlsMenu();
+  else if (screen === 'journal') updateJournalMenu();
+  else if (screen === 'loreRead') updateLoreRead();
+  else if (screen === 'labBriefing') updateLabBriefing();
+  else if (screen === 'labConsole') updateLabConsole();
+  else if (screen === 'lab') updateMenu(labMenu());
+  else if (screen === 'gameover') updateMenu(gameOverMenu());
+  else if (screen === 'victory') updateMenu(victoryMenu());
+}
+
+function updateMenu(items) {
+  if (input.menuUp) menuIndex = (menuIndex - 1 + items.length) % items.length;
+  if (input.menuDown) menuIndex = (menuIndex + 1) % items.length;
+  if (input.confirm || input.attack) items[menuIndex].fn();
+  if (input.cancel && screen !== 'title') {
+    if (screen === 'pause') setScreen('play');
+    else if (screen === 'controls') setScreen(game ? 'pause' : 'title');
+  }
+}
+function updateControlsMenu() {
+  if (input.confirm || input.cancel || input.pause) setScreen(game ? 'pause' : 'title');
+  if (input.menuLeft || input.menuRight) assistMode = !assistMode;
+}
+
+function titleMenu() {
+  return [
+    {label:'New Expedition', fn: newGame},
+    {label: hasSave() ? 'Continue Recovery Beacon Save' : 'Continue - no save yet', fn: () => hasSave() ? continueGame() : notify('No save found yet.')},
+    {label:'Controls / Steam Input Layout', fn: () => setScreen('controls')},
+    {label:'Credits / Concept', fn: () => notify('Concept by Marcelo. Prototype updated with integrated key art, extraction art, and uploaded monster state sprites.', 5)}
+  ];
+}
+function pauseMenu() {
+  return [
+    {label:'Resume', fn: () => setScreen('play')},
+    {label:'Save Recovery Beacon', fn: () => saveGame(true)},
+    {label:'Controls / Accessibility', fn: () => setScreen('controls')},
+    {label:'Lore Archive / Lost Records', fn: () => openJournal('pause')},
+    {label:'Return to Lab Emergency', fn: emergencyReturnToLab},
+    {label:'Quit to Title', fn: () => setScreen('title')}
+  ];
+}
+function labMenu() {
+  return [
+    {label:'Research Console / Scientist Messages', fn: openLabConsole},
+    {label:'Explore a New Abandoned Island', fn: startNextIsland},
+    {label:'Tournament Trial', fn: runTournament},
+    {label:'Upgrade Bracelet with Coins/Relics', fn: upgradeBracelet},
+    {label:'Review Lost Records', fn: () => openJournal('lab')},
+    {label:'Save at Lab', fn: () => saveGame(true)},
+    {label:'Title Screen', fn: () => setScreen('title')}
+  ];
+}
+function victoryMenu() {
+  return [
+    {label:'Decontaminate and Enter Lab', fn: () => { decontaminate(); setScreen(labBriefingQueue.length ? 'labBriefing' : 'lab'); }},
+    {label:'Save First', fn: () => saveGame(true)},
+    {label:'Title Screen', fn: () => setScreen('title')}
+  ];
+}
+function gameOverMenu() {
+  return [
+    {label:'Respawn From Last Recovery Beacon Save', fn: () => hasSave() ? continueGame() : newGame()},
+    {label:'New Expedition', fn: newGame},
+    {label:'Title Screen', fn: () => setScreen('title')}
+  ];
+}
+
+function startNextIsland() {
+  game.islandRank += 1;
+  game.day += 1;
+  generateIsland(false);
+  log('New island generated. Every monster has a new DNA seed and no duplicate identity.', true);
+  saveGame(false);
+  setScreen('play');
+}
+
+function decontaminate() {
+  player.hp = 100; player.stamina = 100; player.hunger = 100; player.hydration = 100; player.temperature = 37; player.infection = 0; player.suit = 100; player.deviceHeat = 0; player.supplies = Math.max(player.supplies, 4);
+  for (const m of game.team) { m.hp = m.maxHp; m.stress = Math.max(0, (m.stress||0)-40); m.recovery = 0; m.bond = Math.min(100, (m.bond||0)+8); }
+  const gain = 25 + game.missionTamed*8 + (game.bossTamed ? 75 : 0);
+  game.research += gain;
+  lastLabMessage = `Lab report: decontamination complete. Research +${gain}. Reserve specimens are being studied for disease cures and habitat designs.`;
+  game.labVisitCount = (game.labVisitCount || 0) + 1;
+  refreshLabResearch(true);
+  saveGame(false);
+}
+
+function emergencyReturnToLab() {
+  lastLabMessage = 'Emergency extraction used. You survived, but the current island mission resets.';
+  decontaminate();
+  setScreen(labBriefingQueue.length ? 'labBriefing' : 'lab');
+}
+
+function runTournament() {
+  if (!game.team.length) { lastLabMessage = 'Tournament denied: tame at least one monster first.'; return; }
+  const teamPower = game.team.reduce((s,m) => s + (m.power || 10) + (m.level||1)*4 + (m.bond||0)*0.4, 0);
+  const opponent = 70 + game.tournamentRank*55 + rnd(0,70);
+  const score = teamPower * rnd(.8,1.25) + (assistMode ? 30 : 0);
+  if (score >= opponent) {
+    game.tournamentRank += 1;
+    const rp = 40 + game.tournamentRank*12;
+    game.research += rp;
+    for (const m of game.team) evolveMonster(m, 'tournament victory');
+    lastLabMessage = `Tournament victory! Rank ${game.tournamentRank}. Research +${rp}. Your seven-slot materialization brace gained trust data.`;
+  } else {
+    game.research += 10;
+    lastLabMessage = 'Tournament loss. Research +10 from battle data. Train, evolve, and try again.';
+  }
+  saveGame(false);
+}
+
+function updatePlay(dt) {
+  ensureEconomyDefaults();
+  if (input.pause) { setScreen('pause'); return; }
+  if (input.map) showMap = !showMap;
+  if (input.journal) { openJournal('play'); return; }
+  if (input.slotPrev) selectedSlot = (selectedSlot + 6) % 7;
+  if (input.slotNext) selectedSlot = (selectedSlot + 1) % 7;
+  if (input.digit !== null) selectedSlot = input.digit;
+
+  game.time += dt;
+  player.invuln = Math.max(0, player.invuln - dt);
+  player.dodgeT = Math.max(0, player.dodgeT - dt);
+  player.attackCooldown = Math.max(0, player.attackCooldown - dt);
+  player.deviceHeat = Math.max(0, player.deviceHeat - dt*8);
+  player.hunger = Math.max(0, player.hunger - dt*0.42);
+  player.hydration = Math.max(0, player.hydration - dt*0.58);
+  if (player.hunger <= 0 || player.hydration <= 0) damagePlayer(dt*3.6, 'starvation/dehydration');
+  if (player.infection > 85) damagePlayer(dt*2.8, 'infection overload');
+  player.stamina = clamp(player.stamina + dt*22, 0, 100);
+  if (player.temperature > 41 || player.temperature < 33.5) damagePlayer(dt*3.2, 'temperature shock');
+
+  applyHazards(dt);
+  updateMovement(dt);
+
+  if (input.useSupply) useSupply();
+  if (input.dodge) dodge();
+  if (input.summon) toggleSummon();
+  updateBraceletCharge(dt);
+  if (input.tame || input.interact) {
+    if (!interactWithLore() && !interactWithCrate() && !interactWithHome()) attemptTame();
+  }
+
+  updateSummon(dt);
+  updateMonsters(dt);
+  updateBoss(dt);
+  updatePulses(dt);
+  updateParticles(dt);
+  checkExtraction();
+  updateCamera();
+  if (player.hp <= 0 && screen === 'play') setScreen('gameover');
+}
+
+function updateMovement(dt) {
+  let mx = input.moveX, my = input.moveY;
+  const mag = Math.hypot(mx,my); if (mag > 1) { mx/=mag; my/=mag; }
+  if (mag > .05) { player.faceX = mx; player.faceY = my; }
+  let speed = player.speed;
+  if (player.dodgeT > 0) speed *= 2.5;
+  else if (input.sprint && player.stamina > 2) { speed *= 1.45; player.stamina -= 25*dt; }
+  const hazard = currentHazardAt(player.x, player.y);
+  if (hazard && hazard.type === 'nival' && !game.modules.nival) speed *= 0.72;
+  player.x = clamp(player.x + mx*speed*dt, 35, game.worldW-35);
+  player.y = clamp(player.y + my*speed*dt, 35, game.worldH-35);
+}
+
+function dodge() {
+  if (player.stamina < 18 || player.dodgeT > 0) return;
+  player.stamina -= 18; player.dodgeT = .22; player.invuln = .38;
+  spawnParticles(player.x, player.y, '#cfe8ff', 9);
+}
+
+function useSupply() {
+  if (player.supplies <= 0) { log('No supplies left. Search abandoned caches.'); return; }
+  player.supplies -= 1;
+  player.hp = clamp(player.hp+35,0,100); player.hunger = clamp(player.hunger+22,0,100); player.hydration = clamp(player.hydration+28,0,100); player.suit = clamp(player.suit+22,0,100); player.infection = Math.max(0, player.infection-15);
+  log('Used field supply: health, suit, food, and water restored.', true);
+}
+
+function applyHazards(dt) {
+  const h = currentHazardAt(player.x, player.y);
+  const natural = 37;
+  if (!h) {
+    player.temperature += (natural - player.temperature) * dt * .65;
+    player.infection = Math.max(0, player.infection - dt*.35);
+    return;
+  }
+  const moduleBonus = game.modules[h.type] ? .28 : 1;
+  if (h.type === 'heat') { player.temperature += dt*1.6*moduleBonus; player.suit -= dt*4.4*moduleBonus; }
+  if (h.type === 'nival') { player.temperature -= dt*1.25*moduleBonus; player.suit -= dt*3.8*moduleBonus; }
+  if (h.type === 'void') { player.deviceHeat += dt*5.5*moduleBonus; player.suit -= dt*3.2*moduleBonus; }
+  if (h.type === 'cosmic') { player.infection += dt*3.8*moduleBonus; player.suit -= dt*3.4*moduleBonus; }
+  if (player.suit <= 0) damagePlayer(dt*7, `${h.type} hazard`);
+  player.suit = clamp(player.suit, 0, 100);
+  if (activeSummon && game.team[selectedSlot]) {
+    const mon = activeSummon.mon;
+    mon.geneMemory = mon.geneMemory || {heat:0,nival:0,void:0,cosmic:0};
+    mon.geneMemory[h.type] = (mon.geneMemory[h.type]||0) + dt;
+    if (mon.geneMemory[h.type] > (mon.nextEvoMemory || 18)) evolveMonster(mon, `${h.type} environment`);
+  }
+}
+
+function currentHazardAt(x,y) {
+  for (const h of game.hazards) if (dist(x,y,h.x,h.y) < h.r) return h;
+  return null;
+}
+
+function interactWithCrate() {
+  let nearest = null, nd = 75;
+  for (const c of game.crates) if (!c.taken) {
+    const d = dist(player.x,player.y,c.x,c.y); if (d < nd) { nearest = c; nd = d; }
+  }
+  if (!nearest) return false;
+  nearest.taken = true;
+  if (nearest.kind === 'supply') {
+    player.supplies += 1;
+    const coins = rndi(8,22); player.coins=(player.coins||0)+coins;
+    log(`Collected field supplies and ${coins} coins.`);
+  } else if (nearest.kind === 'gene') {
+    game.research += 12;
+    const relic = Math.random()<.45 ? 1 : 0; player.relics=(player.relics||0)+relic;
+    log(`Collected gene sample cache. Research +12${relic?' and +1 relic':''}.`);
+  } else if (nearest.kind === 'module') {
+    game.modules[nearest.module] = true;
+    game.research += 25;
+    player.relics=(player.relics||0)+1;
+    log(`Suit module installed: ${nearest.name}. Relic +1. Special suit protection improved.`, true);
+    saveGame(false);
+  }
+  gainBraceletXp(3, 'loot scan');
+  spawnParticles(nearest.x, nearest.y, '#fff4a8', 20);
+  return true;
+}
+function interactWithHome() {
+  ensureEconomyDefaults();
+  let nearest=null, nd=92;
+  for(const h of game.homes||[]) if(!h.looted){
+    const d=dist(player.x,player.y,h.x,h.y);
+    if(d<nd){nearest=h; nd=d;}
+  }
+  if(!nearest) return false;
+  nearest.looted=true;
+  const coins=rndi(15,55), supplies=rndi(0,2), relic=Math.random()<0.5?1:0;
+  player.coins=(player.coins||0)+coins; player.supplies+=supplies; player.relics=(player.relics||0)+relic;
+  game.research += 4;
+  gainBraceletXp(5,'abandoned home scan');
+  log(`Searched broken home: +${coins} coins, +${supplies} supplies${relic?', +1 relic':''}. Found ${nearest.texture}.`, true);
+  spawnParticles(nearest.x, nearest.y, '#ffd985', 24);
+  return true;
+}
+
+
+function commandAttack(charged=false, chargeAmount=0) {
+  ensureEconomyDefaults();
+  if (player.attackCooldown > 0 && !charged) return;
+  const profile = braceletAttackProfile(charged);
+  if (player.deviceHeat + profile.heat > 116) { log('Bracelet overheated. Let it cool before firing again.'); return; }
+  const target = findNearestEnemy(player.x, player.y, profile.range);
+  if (!target) { if(!charged) log('No monster close enough for bracelet shot.'); player.attackCooldown = .18; return; }
+  const apexBonus = (target.id === 'boss-nexarion' && charged) ? 1.45 : 1;
+  const tameSoftener = (target.hp / target.maxHp <= 0.50) ? 0.86 : 1;
+  const dmg = (profile.power + rnd(0, 5 + (player.braceletLevel||1))) * apexBonus * tameSoftener;
+  pulses.push({x:player.x,y:player.y,tx:target.x,ty:target.y,t: charged ? .28 : .16,color:profile.color});
+  dealDamage(target, dmg, profile.name);
+  player.deviceHeat = clamp(player.deviceHeat + profile.heat, 0, 110);
+  player.attackCooldown = charged ? .82 : .34;
+  player.lastBraceletAttack = `${profile.name} dealt ${Math.round(dmg)} damage`;
+  gainBraceletXp(charged ? 5 : 2, profile.name);
+  log(`${profile.name}: ${Math.round(dmg)} damage. ${target.name} HP ${Math.max(0,Math.ceil(target.hp))}/${Math.ceil(target.maxHp)}.`, charged);
+}
+
+function dealDamage(target, dmg, source) {
+  target.hp -= dmg;
+  target.stress = clamp((target.stress || 0) + (source === 'stabilizer carbine' ? 7 : 5), 0, 140);
+  target.damagedFlash = .18;
+  spawnParticles(target.x, target.y, STATE_COLORS[target.element] || '#fff', 7);
+  if (target.hp <= 0) {
+    if (target.id === 'boss-nexarion') { target.hp = 1; target.stress = 120; log('Nexarion refuses to die. Stabilize and tame it with the completed suit.'); }
+    else {
+      log(`${target.name} collapsed and escaped into the biome. Lower HP is good, but do not overdo it when taming.`);
+      game.monsters = game.monsters.filter(m => m.id !== target.id);
+    }
+  }
+}
+
+function findNearestEnemy(x,y,range) {
+  let best = null, bd = range;
+  for (const m of game.monsters) {
+    const d = dist(x,y,m.x,m.y); if (d < bd) { best = m; bd = d; }
+  }
+  if (game.boss && !game.bossTamed) {
+    const d = dist(x,y,game.boss.x,game.boss.y); if (d < bd) best = game.boss;
+  }
+  return best;
+}
+
+function findBestTameTarget() {
+  // The apex monster is very large, so the player can be close to its body
+  // while still being far from its center. This prevents the "I press tame and
+  // nothing happens" problem.
+  const boss = game?.boss && !game.bossTamed ? game.boss : null;
+  if (boss) {
+    const d = dist(player.x, player.y, boss.x, boss.y);
+    const bossContactRange = boss.radius + 190;
+    const bossReady = boss.hp / boss.maxHp <= .46;
+    if (d < bossContactRange || (bossReady && d < boss.radius + 260)) return boss;
+  }
+  let best = null, bd = 155;
+  for (const m of game.monsters) {
+    const d = dist(player.x, player.y, m.x, m.y);
+    if (d < bd) { best = m; bd = d; }
+  }
+  return best;
+}
+
+function attemptTame() {
+  const target = findBestTameTarget();
+  if (!target) { log('No wild monster close enough to scan/tame. Move closer to the body and press E/F again.'); return; }
+  if (player.deviceHeat > 88) { log('Brace is overheated. Let it cool before taming.'); return; }
+  if (target.id === 'boss-nexarion') return attemptBossTame(target);
+  const hpPct = target.hp / target.maxHp;
+  if (hpPct > .46) { log(`${target.name} is too strong. Weaken it to 46% HP or lower first.`); return; }
+  if (target.stress > 112 && !assistMode) { log(`${target.name} is too stressed. Stop attacking and let it calm down.`); target.stress -= 8; return; }
+  const chance = clamp(.45 + (0.46-hpPct)*1.25 + (assistMode ? .25 : 0) - target.stress/280, .18, .92);
+  player.deviceHeat += 22;
+  pulses.push({x:player.x,y:player.y,tx:target.x,ty:target.y,t:.5,color:'#79f3ff'});
+  if (Math.random() < chance) {
+    captureTarget(target, false);
+  } else {
+    target.stress += 22; target.aggro += 80;
+    log(`Tame failed (${Math.round(chance*100)}% chance). Its stress increased.`);
+  }
+}
+
+function attemptBossTame(boss) {
+  if (!allModules()) { log('Nexarion requires all 4 suit cores before capture: Heatwave, Nival-Tide, Void, and Cosmic.', true); return; }
+  if (boss.hp / boss.maxHp > .46) { log('Nexarion must be weakened to 46% HP or lower before Apex Bond. Charge bracelet shots help with big monsters.'); return; }
+  if (player.suit < 30) { log('Suit integrity too low for Apex Bond. Repair with supplies first.'); return; }
+  if (player.deviceHeat > 78) { log('Bracelet too hot. Cool down before Apex Bond.'); return; }
+  player.deviceHeat += 34;
+  boss.stress += 8;
+  const hpPct = boss.hp / boss.maxHp;
+  const moduleBoost = allModules() ? .28 : 0;
+  const braceletBoost = Math.min(.22, (player.braceletLevel||1)*.018);
+  const chance = clamp(.55 + (0.46-hpPct)*1.2 + moduleBoost + braceletBoost + (assistMode ? .16 : 0) - boss.stress/500, .42, .98);
+  pulses.push({x:player.x,y:player.y,tx:boss.x,ty:boss.y,t:.65,color:'#ffffff'});
+  if (Math.random() < chance) {
+    captureTarget(boss, true);
+    game.bossTamed = true; game.boss = null;
+    log('Apex Bond complete. Nexarion was captured after the full suit-core requirement.', true);
+    saveGame(false);
+  } else {
+    boss.stress = Math.max(10, boss.stress - 12);
+    log(`Apex Bond failed (${Math.round(chance*100)}%). It stays weakened; cool the bracelet and try again.`, true);
+  }
+}
+
+function captureTarget(target, isBoss) {
+  const mon = {
+    id: target.id, name: target.name, family: target.family || 'Chimera', form: target.form || 'Prime',
+    element: isBoss ? 'fusion' : target.element, sprite: isBoss ? 'equinox' : target.sprite,
+    level: target.level || 1, hp: target.maxHp, maxHp: target.maxHp,
+    stress: Math.max(0, (target.stress||0)-35), bond: isBoss ? 35 : 18,
+    power: target.power || 12, dna: target.dna, recovery:0, geneMemory:{heat:0,nival:0,void:0,cosmic:0}, nextEvoMemory: 18,
+    skills: (target.skills || monsterSkillsFor(isBoss ? 'fusion' : target.element, target.level||1)).map(s => ({...s, currentCd:0})),
+    skillMemory: 0, nextSkillAt: 3, adaptiveSkillCount: target.adaptiveSkillCount || 0
+  };
+  maybeLearnSkill(mon, 'bond sync');
+  game.totalCaptured += 1; game.missionTamed += 1;
+  const coinGain = isBoss ? 180 : 22 + Math.round((target.level||1)*6);
+  const relicGain = isBoss ? 4 : ((target.level||1) >= 4 || Math.random() < .25 ? 1 : 0);
+  player.coins = (player.coins||0) + coinGain;
+  player.relics = (player.relics||0) + relicGain;
+  gainBraceletXp(isBoss ? 35 : 10 + (target.level||1)*2, 'capture sync');
+  log(`Rewards: +${coinGain} coins${relicGain?`, +${relicGain} relic`:''}.`, true);
+  if (game.team.length < 7) {
+    game.team.push(mon);
+    selectedSlot = Math.min(6, game.team.length-1);
+    log(`Tamed ${mon.name} (${mon.form} form). Added to brace slot ${game.team.length}/7.`, true);
+  } else {
+    game.labSpecimens.push(mon);
+    game.research += isBoss ? 90 : 18;
+    log(`Tamed ${mon.name}. Seven slots are full, so it was safely sent to the lab for disease research.`, true);
+  }
+  if (!isBoss) game.monsters = game.monsters.filter(m => m.id !== target.id);
+  spawnParticles(target.x, target.y, isBoss ? '#ffffff' : '#79f3ff', 35);
+  saveGame(false);
+}
+
+function toggleSummon() {
+  const mon = game.team[selectedSlot];
+  if (!mon) { log(`Brace slot ${selectedSlot+1} is empty.`); return; }
+  normalizeTamedMonster(mon);
+  if (mon.recovery > 0) { log(`${mon.name} is recovering inside the bracelet for ${Math.ceil(mon.recovery)}s.`); return; }
+  if (mon.hp <= 0) { mon.recovery = assistMode ? 8 : 12; log(`${mon.name} is still reforming inside the bracelet.`); return; }
+  if (activeSummon && activeSummon.slot === selectedSlot) {
+    log(`${mon.name} dematerialized into the bracelet and will heal over time.`);
+    activeSummon = null; player.deviceHeat += 5; return;
+  }
+  if (player.deviceHeat > 78) { log('Brace is too hot to materialize a monster.'); return; }
+  activeSummon = {slot:selectedSlot, mon, x:player.x+48, y:player.y+20, energy:100, attackCd:0};
+  player.deviceHeat += 12;
+  log(`${mon.name} materialized from the hand device.`, true);
+  spawnParticles(activeSummon.x, activeSummon.y, STATE_COLORS[mon.element]||'#fff', 25);
+}
+
+function updateSummon(dt) {
+  updateBraceletRecovery(dt);
+  if (!activeSummon) return;
+  const mon = activeSummon.mon;
+  if (!game.team[activeSummon.slot] || mon.hp <= 0) { activeSummon = null; return; }
+  activeSummon.attackCd = Math.max(0, activeSummon.attackCd - dt);
+  activeSummon.energy = Math.max(0, activeSummon.energy - dt*1.2);
+  const target = findNearestEnemy(activeSummon.x, activeSummon.y, 230);
+  let tx = player.x + 54, ty = player.y + 25;
+  if (target) { tx = target.x; ty = target.y; }
+  const d = dist(activeSummon.x, activeSummon.y, tx, ty) || 1;
+  const speed = target ? 175 : 240;
+  if (d > (target ? 80 : 45)) { activeSummon.x += (tx-activeSummon.x)/d*speed*dt; activeSummon.y += (ty-activeSummon.y)/d*speed*dt; }
+  if (target && d < 110 && activeSummon.attackCd <= 0) {
+    const skill = chooseAutoSkill(mon);
+    const dmg = skill.power + (mon.power || 12)*0.34 + (mon.level||1)*1.1 + rnd(0,4.5);
+    dealDamage(target, dmg, skill.name);
+    activeSummon.attackCd = skill.cd || 1;
+    if (mon.skills) {
+      const found = mon.skills.find(s => s.name === skill.name);
+      if (found) found.currentCd = found.cd;
+    }
+    mon.bond = clamp((mon.bond||0)+.55,0,100);
+    mon.lastSkillUsed = skill.name;
+    mon.lastSkillEvent = `${skill.name} auto-cast`;
+    pulses.push({x:activeSummon.x,y:activeSummon.y,tx:target.x,ty:target.y,t:.15,color:skill.color || (STATE_COLORS[mon.element]||'#fff')});
+    if (Math.random() < 0.22) maybeLearnSkill(mon, 'real-time combat');
+  }
+  if (activeSummon.energy <= 0) { log(`${mon.name} returned to the brace to recharge.`); activeSummon = null; }
+}
+
+function updateMonsters(dt) {
+  for (const m of game.monsters) {
+    m.attackCd = Math.max(0, m.attackCd - dt);
+    m.damagedFlash = Math.max(0, m.damagedFlash - dt);
+    m.stress = Math.max(0, m.stress - dt*2.2);
+    const targetX = activeSummon ? activeSummon.x : player.x;
+    const targetY = activeSummon ? activeSummon.y : player.y;
+    const d = dist(m.x,m.y,targetX,targetY);
+    const aggro = m.aggro + (m.stress > 85 ? 140 : 0);
+    if (d < aggro) {
+      const dx = (targetX-m.x)/(d||1), dy=(targetY-m.y)/(d||1);
+      m.x += dx*m.speed*dt; m.y += dy*m.speed*dt;
+      if (d < m.radius + (activeSummon?34:27) && m.attackCd <= 0) {
+        if (activeSummon) damageSummon(m.power*.9, m.name);
+        else damagePlayer(m.power, m.name);
+        m.attackCd = 1.15 + Math.random()*.6;
+      }
+    } else {
+      m.x += Math.sin(game.time*.4 + m.x*.01) * dt*18;
+      m.y += Math.cos(game.time*.36 + m.y*.01) * dt*18;
+    }
+    m.x = clamp(m.x, 45, game.worldW-45); m.y = clamp(m.y,45,game.worldH-45);
+  }
+}
+
+function updateBoss(dt) {
+  const b = game.boss;
+  if (!b || game.bossTamed) return;
+  b.attackCd = Math.max(0, b.attackCd - dt);
+  b.damagedFlash = Math.max(0, b.damagedFlash - dt);
+  b.stateTimer += dt;
+  if (b.stateTimer > 5.8) { b.stateTimer = 0; b.stateIndex = (b.stateIndex + 1) % b.states.length; log(`Nexarion shifted into ${bossStateName(b.states[b.stateIndex])}.`); }
+  const state = b.states[b.stateIndex];
+  const targetX = activeSummon ? activeSummon.x : player.x;
+  const targetY = activeSummon ? activeSummon.y : player.y;
+  const d = dist(b.x,b.y,targetX,targetY);
+  if (d < 900) {
+    const dx=(targetX-b.x)/(d||1), dy=(targetY-b.y)/(d||1);
+    b.x += dx*b.speed*dt*(state==='fusion'?1.28:1);
+    b.y += dy*b.speed*dt*(state==='fusion'?1.28:1);
+    if (state === 'void' && d < 520) { player.x -= dx*45*dt; player.y -= dy*45*dt; player.deviceHeat += dt*2.3; }
+    if (state === 'cosmic' && Math.random() < dt*.75) pulses.push({x:b.x,y:b.y,tx:player.x,ty:player.y,t:.55,color:'#f5dd72',harm:true});
+    if (state === 'heat' && d < 180 && Math.random() < dt*2) player.temperature += dt*8;
+    if (state === 'nival' && d < 220) player.stamina = Math.max(0, player.stamina - dt*9);
+    if (d < b.radius + (activeSummon?42:29) && b.attackCd <= 0) {
+      const power = b.power * (state === 'fusion' ? 1.45 : 1);
+      if (activeSummon) damageSummon(power, 'Nexarion'); else damagePlayer(power, 'Nexarion');
+      b.attackCd = state === 'fusion' ? .8 : 1.15;
+    }
+  }
+  b.x = clamp(b.x, 100, game.worldW-100); b.y = clamp(b.y,100,game.worldH-100);
+}
+
+function bossStateName(s) {
+  return ({heat:'Heatwave State', nival:'Nival-Tide State', void:'Void State', cosmic:'Cosmic Halo State', fusion:'Equinox Fusion State'})[s] || s;
+}
+
+function damagePlayer(amount, source) {
+  if (player.invuln > 0) return;
+  const mitigated = Math.max(1, amount * (assistMode ? .62 : 1));
+  player.hp = clamp(player.hp - mitigated, 0, 100);
+  player.invuln = .35;
+  spawnParticles(player.x, player.y, '#ff6b6b', 9);
+  if (player.hp <= 0) {
+    lastLabMessage = `You were defeated by ${source}. Respawn uses the last Recovery Beacon save.`;
+  }
+}
+function damageSummon(amount, source) {
+  if (!activeSummon) return;
+  const mon = activeSummon.mon;
+  normalizeTamedMonster(mon);
+  mon.hp = clamp(mon.hp - amount, 0, mon.maxHp);
+  mon.braceFullNotified = false;
+  mon.stress = clamp((mon.stress||0)+7,0,140);
+  spawnParticles(activeSummon.x, activeSummon.y, STATE_COLORS[mon.element]||'#fff', 10);
+  if (mon.hp <= 0) {
+    mon.recovery = assistMode ? 10 : 18;
+    log(`${mon.name} was forced back into the bracelet by ${source}. It will recover automatically.`);
+    activeSummon = null;
+  }
+}
+
+function evolveMonster(mon, reason) {
+  mon.level = (mon.level||1) + 1;
+  mon.power = (mon.power||10) + rnd(1.2, 3.7);
+  mon.maxHp = (mon.maxHp||60) + rnd(3, 9);
+  mon.hp = Math.min(mon.maxHp, (mon.hp||mon.maxHp) + 12);
+  mon.nextEvoMemory = (mon.nextEvoMemory || 18) * 1.35;
+  maybeLearnSkill(mon, reason);
+  log(`${mon.name} evolved from ${reason}. Level ${mon.level}. There is no level cap.`, true);
+}
+
+function updatePulses(dt) {
+  for (const p of pulses) {
+    p.t -= dt;
+    if (p.harm && p.t < .25) damagePlayer(10, 'cosmic projectile');
+  }
+  pulses = pulses.filter(p => p.t > 0);
+}
+function spawnParticles(x,y,color,count) {
+  for (let i=0;i<count;i++) particles.push({x,y,vx:rnd(-80,80),vy:rnd(-80,80),t:rnd(.35,.9),color});
+}
+function updateParticles(dt) {
+  for (const p of particles) { p.t -= dt; p.x += p.vx*dt; p.y += p.vy*dt; p.vx *= .98; p.vy *= .98; }
+  particles = particles.filter(p => p.t > 0);
+}
+
+function checkExtraction() {
+  const ex = extractionZone();
+  if (dist(player.x,player.y,ex.x,ex.y) < ex.r) {
+    if (extractionUnlocked()) {
+      lastLabMessage = 'Mission success. All suit cores secured, Nexarion captured, and seven total monsters registered. Extraction shield opened.';
+      saveGame(false);
+      setScreen('victory');
+    } else if (game.time % 2 < .03) {
+      const needCores = allModules() ? '' : 'collect all 4 suit cores, ';
+      const needBoss = game.bossTamed ? '' : 'capture Nexarion, ';
+      const needTeam = game.missionTamed >= 7 ? '' : `capture ${7-game.missionTamed} more monster(s), `;
+      log(`Extraction locked: ${needCores}${needBoss}${needTeam}then return to the ship.`);
+    }
+  }
+}
+function extractionZone() { return {x: game.worldW-165, y: 165, r: 110}; }
+
+function updateCamera() {
+  camera.x = clamp(player.x - W/2, 0, game.worldW-W);
+  camera.y = clamp(player.y - H/2, 0, game.worldH-H);
+}
+
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  if (screen === 'play') drawPlay();
+  else if (screen === 'title') drawTitle();
+  else if (screen === 'pause') { drawPlay(); drawPause(); }
+  else if (screen === 'controls') drawControls();
+  else if (screen === 'journal') drawJournal();
+  else if (screen === 'loreRead') { if (loreReturnScreen === 'journal') drawBackgroundPoster(); else drawPlay(); drawLoreReader(); }
+  else if (screen === 'labBriefing') drawLabBriefing();
+  else if (screen === 'labConsole') drawLabConsole();
+  else if (screen === 'lab') drawLab();
+  else if (screen === 'gameover') drawGameOver();
+  else if (screen === 'victory') drawVictory();
+  drawNotifications();
+}
+
+function drawPlay() {
+  ctx.save();
+  ctx.translate(-camera.x, -camera.y);
+  drawWorld();
+  drawHazards();
+  drawRuins();
+  drawHomes();
+  drawLoreNodes();
+  drawCrates();
+  drawExtraction();
+  drawMonsters();
+  drawBoss();
+  drawPulses();
+  drawParticlesWorld();
+  drawPlayer();
+  drawSummon();
+  ctx.restore();
+  drawHUD();
+  if (showMap) drawMap();
+}
+
+function drawWorld() {
+  ensureEconomyDefaults();
+  const b = game.biome || BIOMES[0];
+  const t = (Math.sin(game.time*0.055)+1)/2;
+  const sky = ctx.createLinearGradient(0,0,0,game.worldH);
+  sky.addColorStop(0, b.sky1 || '#15304b');
+  sky.addColorStop(1, b.sky2 || '#071018');
+  ctx.fillStyle = sky; ctx.fillRect(0,0,game.worldW,game.worldH);
+  const ground = ctx.createLinearGradient(0,0,0,game.worldH);
+  ground.addColorStop(0,b.ground1 || '#1c2b2d'); ground.addColorStop(1,b.ground2 || '#10191a');
+  ctx.fillStyle = ground; ctx.fillRect(0,0,game.worldW,game.worldH);
+  for (let y=0;y<game.worldH;y+=96) for (let x=0;x<game.worldW;x+=96) {
+    const n = (Math.sin((x+b.seed)*0.02)+Math.cos((y-b.seed)*0.018)+Math.sin((x+y)*0.009))*0.5;
+    ctx.fillStyle = n > 0 ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.055)';
+    ctx.fillRect(x,y,96,96);
+  }
+  ctx.fillStyle = b.fog || 'rgba(90,130,150,.10)';
+  for(let i=0;i<28;i++){
+    const x=(i*211 + game.time*12)%game.worldW, y=(i*137)%game.worldH;
+    ctx.beginPath(); ctx.ellipse(x,y,95,28,0,0,TAU); ctx.fill();
+  }
+  const dark = 0.16 + (1-t)*0.25;
+  ctx.fillStyle = `rgba(4,7,13,${dark})`; ctx.fillRect(0,0,game.worldW,game.worldH);
+}
+function drawHazards() {
+  for (const h of game.hazards) {
+    const col = STATE_COLORS[h.type] || '#fff';
+    const grd = ctx.createRadialGradient(h.x,h.y,5,h.x,h.y,h.r);
+    grd.addColorStop(0, col+'66'); grd.addColorStop(1, col+'08');
+    ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(h.x,h.y,h.r,0,TAU); ctx.fill();
+    ctx.strokeStyle = col+'55'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(h.x,h.y,h.r*(.87+.05*Math.sin(game.time*2+h.pulse)),0,TAU); ctx.stroke();
+  }
+}
+function drawRuins() {
+  for (const r of game.ruins) {
+    ctx.save(); ctx.translate(r.x,r.y); ctx.rotate(r.rot);
+    ctx.fillStyle = 'rgba(0,0,0,.22)'; ctx.beginPath(); ctx.ellipse(18,22,r.w*0.58,r.h*0.34,0,0,TAU); ctx.fill();
+    const wall = ctx.createLinearGradient(-r.w/2,0,r.w/2,0);
+    wall.addColorStop(0,'#56472f'); wall.addColorStop(.5,'#b89959'); wall.addColorStop(1,'#6b5637');
+    ctx.fillStyle = wall; ctx.beginPath(); ctx.roundRect(-r.w/2,-r.h/2,r.w,r.h,10); ctx.fill();
+    ctx.strokeStyle = '#ead09a'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(36,28,14,.55)'; ctx.beginPath(); ctx.roundRect(-r.w/2+12,-r.h/2+12,r.w-24,r.h-24,8); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.09)'; ctx.fillRect(-r.w/2+6,-r.h/2+6,r.w-12,8);
+    for (let i=0;i<5;i++) {
+      const cx = ((i*37)%Math.max(20,r.w))-r.w/2;
+      const cy = ((i*29)%Math.max(20,r.h))-r.h/2;
+      ctx.fillStyle = 'rgba(28,20,10,.65)'; ctx.fillRect(cx,cy,8+((i*5)%16),6+((i*7)%12));
+    }
+    ctx.restore();
+  }
+}
+function drawHomes() {
+  for (const h of (game.homes||[])) {
+    ctx.save(); ctx.translate(h.x,h.y); ctx.rotate(h.rot);
+    ctx.fillStyle='rgba(0,0,0,.30)'; ctx.beginPath(); ctx.ellipse(10,18,h.w*.62,h.h*.42,0,0,TAU); ctx.fill();
+    const wall=ctx.createLinearGradient(-h.w/2,-h.h/2,h.w/2,h.h/2);
+    wall.addColorStop(0,'#6b604f'); wall.addColorStop(.55,h.looted?'#493f35':'#8a7657'); wall.addColorStop(1,'#2a2520');
+    ctx.fillStyle=wall; ctx.beginPath(); ctx.roundRect(-h.w/2,-h.h/2,h.w,h.h,8); ctx.fill();
+    ctx.strokeStyle=h.looted?'#444':'#d3ba78'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#1b1714'; ctx.fillRect(-12,h.h/2-32,24,32);
+    ctx.strokeStyle='#d6b46b'; ctx.strokeRect(-12,h.h/2-32,24,32);
+    for(let i=0;i<h.windows;i++){ const wx=-h.w/2+18+i*(h.w-36)/Math.max(1,h.windows-1); ctx.fillStyle='rgba(90,180,220,.18)'; ctx.fillRect(wx-9,-h.h/2+18,18,16); ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.strokeRect(wx-9,-h.h/2+18,18,16); }
+    ctx.strokeStyle='rgba(20,10,5,.75)'; ctx.lineWidth=2;
+    for(const c of h.cracks){ ctx.beginPath(); ctx.moveTo((c[0])*h.w,(c[1])*h.h); ctx.lineTo((c[0]+c[2])*h.w,(c[1]+c[3])*h.h); ctx.stroke(); }
+    ctx.fillStyle='rgba(245,220,160,.22)'; ctx.fillRect(-h.w/2+10,h.h/2-50,34,22);
+    ctx.restore();
+    if(!h.looted && dist(player.x,player.y,h.x,h.y)<92) drawWorldText('Press E/F to search broken home', h.x, h.y-h.h*.65, '#ffffff');
+    if(h.looted && dist(player.x,player.y,h.x,h.y)<92) drawWorldText(`Searched home • ${h.texture}`, h.x, h.y-h.h*.65, '#c9d3da');
+  }
+}
+
+function drawLoreNodes() {
+  for (const n of (game.loreNodes || [])) {
+    const col = loreColor(n.type);
+    ctx.save();
+    ctx.globalAlpha = n.found ? .48 : 1;
+    ctx.fillStyle = col;
+    ctx.strokeStyle = 'rgba(0,0,0,.75)';
+    ctx.lineWidth = 3;
+    if (n.type === 'diary') {
+      ctx.beginPath(); ctx.roundRect(n.x-15,n.y-18,30,36,5); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(n.x-8,n.y-5); ctx.lineTo(n.x+8,n.y-5); ctx.moveTo(n.x-8,n.y+3); ctx.lineTo(n.x+8,n.y+3); ctx.stroke();
+    } else if (n.type === 'wall') {
+      ctx.beginPath(); ctx.roundRect(n.x-18,n.y-18,36,36,6); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#1d1a0c'; ctx.font = 'bold 22px serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('✚', n.x, n.y+1);
+    } else {
+      ctx.beginPath(); ctx.moveTo(n.x,n.y-20); ctx.lineTo(n.x+18,n.y+14); ctx.lineTo(n.x-18,n.y+14); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#1c0b0b'; ctx.font = 'bold 18px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('!', n.x, n.y+3);
+    }
+    ctx.restore();
+    if (dist(player.x,player.y,n.x,n.y)<90) {
+      const label = n.found ? `Press E/F to reread ${loreTypeLabel(n.type)}` : `Press E/F to recover ${loreTypeLabel(n.type)}`;
+      drawWorldText(label, n.x, n.y-38, '#ffffff');
+    }
+  }
+}
+function drawCrates() {
+  for (const c of game.crates) if (!c.taken) {
+    const col = c.kind==='module' ? STATE_COLORS[c.module] : c.kind==='gene' ? '#9aff7d' : '#f4d17c';
+    ctx.fillStyle = col; ctx.strokeStyle = '#10131b'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.roundRect(c.x-18,c.y-18,36,36,8); ctx.fill(); ctx.stroke();
+    if (dist(player.x,player.y,c.x,c.y)<78) drawWorldText(c.kind==='module'?c.name:'Press E/F to collect', c.x, c.y-32, '#ffffff');
+  }
+}
+function drawExtraction() {
+  const e = extractionZone();
+  const open = extractionUnlocked();
+  ctx.fillStyle = open ? 'rgba(125,255,195,.2)' : 'rgba(120,140,160,.18)';
+  ctx.strokeStyle = open ? '#7dffc3' : '#8fa3b6'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill(); ctx.stroke();
+  drawWorldText(open ? 'EXTRACTION READY' : 'EXTRACTION LOCKED', e.x, e.y-8, open?'#bffff0':'#d5e2ef');
+  drawWorldText('Escape after mission success', e.x, e.y+18, '#d5e2ef');
+}
+function drawMonsters() {
+  for (const m of game.monsters) drawMonsterEntity(m, 1);
+}
+function drawBoss() {
+  const b = game.boss; if (!b || game.bossTamed) return;
+  const state = b.states[b.stateIndex];
+  const size = 190 + Math.sin(game.time*5)*6;
+  const hpPct = b.hp / b.maxHp;
+  const ready = hpPct <= .46;
+  ctx.save(); ctx.globalAlpha = .24; ctx.fillStyle = STATE_COLORS[state] || '#fff'; ctx.beginPath(); ctx.arc(b.x,b.y,130,0,TAU); ctx.fill(); ctx.restore();
+  drawImageSprite(assets.equinox, b.x, b.y, size, b.damagedFlash>0);
+  drawHpBar(b.x-92,b.y-size*.33,b.hp/b.maxHp, 184, STATE_COLORS[state]||'#fff');
+  drawWorldText(ready ? 'Nexarion • APEX TAME READY • Press E/F' : 'Nexarion • weaken to 46% HP • '+bossStateName(state), b.x, b.y+size*.33, ready ? '#aef7ff' : '#ffffff');
+}
+function drawMonsterEntity(m, scale=1) {
+  const img = assets[m.sprite] || assets.heat;
+  const size = m.radius*2.45*scale;
+  ctx.save();
+  ctx.globalAlpha = .16; ctx.fillStyle = STATE_COLORS[m.element] || '#fff'; ctx.beginPath(); ctx.ellipse(m.x,m.y+10,m.radius*1.55,m.radius*.72,0,0,TAU); ctx.fill();
+  ctx.globalAlpha = .18; ctx.beginPath(); ctx.arc(m.x,m.y,m.radius*1.65,0,TAU); ctx.fill();
+  ctx.restore();
+  drawImageSprite(img,m.x,m.y,size,m.damagedFlash>0);
+  drawHpBar(m.x-m.radius,m.y-size*.36,m.hp/m.maxHp,m.radius*2,STATE_COLORS[m.element]||'#fff');
+  const tameReady = (m.hp/m.maxHp) <= .46;
+  if (dist(player.x,player.y,m.x,m.y)<165) drawWorldText(`${m.name} • ${m.form} • HP ${Math.ceil(m.hp)}/${Math.ceil(m.maxHp)} • ${tameReady?'TAME READY':'Weaken to 46%'} `, m.x, m.y+size*.36, tameReady ? '#aef7ff' : '#ffffff');
+}
+function drawPlayer() {
+  ctx.save();
+  ctx.translate(player.x,player.y);
+  const pulse = player.invuln>0 ? .55+.35*Math.sin(game.time*35) : 1;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0,18,22,11,0,0,TAU); ctx.fill();
+  ctx.fillStyle = '#dbefff'; ctx.beginPath(); ctx.roundRect(-10,-20,20,34,8); ctx.fill();
+  ctx.strokeStyle = '#73d7ff'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = '#eef7ff'; ctx.beginPath(); ctx.arc(0,-27,10,0,TAU); ctx.fill();
+  ctx.strokeStyle = '#ffe17a'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(2,-6); ctx.lineTo(player.faceX*28+2, player.faceY*28-6); ctx.stroke();
+  ctx.fillStyle = '#ffe17a'; ctx.beginPath(); ctx.arc(player.faceX*28+2, player.faceY*28-6,4,0,TAU); ctx.fill();
+  ctx.restore();
+}
+function drawSummon() {
+  if (!activeSummon) return;
+  const mon = activeSummon.mon;
+  const img = assets[mon.sprite] || assets.void;
+  ctx.save(); ctx.globalAlpha = .22; ctx.fillStyle = STATE_COLORS[mon.element]||'#fff'; ctx.beginPath(); ctx.arc(activeSummon.x, activeSummon.y, 58,0,TAU); ctx.fill(); ctx.restore();
+  drawImageSprite(img,activeSummon.x,activeSummon.y,96,false);
+  drawHpBar(activeSummon.x-45, activeSummon.y-62, mon.hp/mon.maxHp, 90, STATE_COLORS[mon.element]||'#fff');
+  drawWorldText(mon.name, activeSummon.x, activeSummon.y+62, '#ffffff');
+}
+function drawPulses() {
+  ctx.save();
+  for (const p of pulses) {
+    ctx.globalAlpha = clamp(p.t*3,0,1);
+    ctx.strokeStyle = p.color; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.tx,p.ty); ctx.stroke();
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.tx,p.ty,10+p.t*20,0,TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawParticlesWorld() {
+  ctx.save();
+  for (const p of particles) { ctx.globalAlpha = clamp(p.t*1.5,0,1); ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x,p.y,3+p.t*3,0,TAU); ctx.fill(); }
+  ctx.restore();
+}
+function drawImageSprite(img,x,y,size,flash=false) {
+  if (!img || !img.complete) return;
+  ctx.save(); ctx.translate(x,y);
+  if (flash) { ctx.shadowColor = '#fff'; ctx.shadowBlur = 25; }
+  ctx.drawImage(img, -size/2, -size/2, size, size);
+  ctx.restore();
+}
+function drawHpBar(x,y,pct,w,col) {
+  ctx.fillStyle = 'rgba(0,0,0,.58)'; ctx.fillRect(x,y,w,8);
+  ctx.fillStyle = col; ctx.fillRect(x,y,clamp(pct,0,1)*w,8);
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.strokeRect(x,y,w,8);
+}
+function drawWorldText(text,x,y,color='#fff') {
+  ctx.save(); ctx.font = 'bold 15px system-ui, sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.lineWidth=4; ctx.strokeStyle='rgba(0,0,0,.75)'; ctx.strokeText(text,x,y); ctx.fillStyle=color; ctx.fillText(text,x,y); ctx.restore();
+}
+
+function drawHUD() {
+  ensureEconomyDefaults();
+  ctx.save();
+  drawPanel(12,12,360,158,'rgba(6,10,16,.78)');
+  drawBarUI(28,32,150,12,player.hp/100,'HP', '#ff6b6b');
+  drawBarUI(28,54,150,12,player.stamina/100,'STA', '#9cd7ff');
+  drawBarUI(28,76,150,12,player.hunger/100,'FOOD', '#f1c66b');
+  drawBarUI(28,98,150,12,player.hydration/100,'WATER', '#6bd4ff');
+  drawBarUI(198,32,140,12,player.suit/100,'SUIT', '#c7e8ff');
+  drawBarUI(198,54,140,12,player.deviceHeat/100,'BRACE HEAT', '#ff8e54');
+  drawBarUI(198,76,140,12,player.infection/100,'BIO-RISK', '#a5ff70');
+  drawBarUI(198,98,140,12,(player.braceletCharge||0)/100,'CHARGE', '#ffe37a');
+  ctx.fillStyle='#e9f4ff'; ctx.font='13px system-ui';
+  ctx.fillText(`Coins ${player.coins||0}  Relics ${player.relics||0}  Supplies ${player.supplies}`, 28, 128);
+  ctx.fillText(`Bracelet Lv ${player.braceletLevel||1}  XP ${Math.floor(player.braceletXp||0)}/${braceletXpTarget()}`, 28, 149);
+
+  drawPanel(390,12,510,104,'rgba(6,10,16,.78)');
+  ctx.fillStyle='#f9fbff'; ctx.font='bold 18px system-ui'; ctx.fillText(game.islandName, 408, 38);
+  ctx.font='14px system-ui';
+  ctx.fillText(`Biome: ${(game.biome&&game.biome.name)||'Unknown'} • Weather: ${(game.biome&&game.biome.weather)||'Unknown'}`, 408, 60);
+  ctx.fillText(`Objective: cores ${allModules()?'complete':'missing'} • Nexarion ${game.bossTamed?'captured':'wild'} • Monsters ${game.missionTamed}/7`, 408, 82);
+  ctx.fillText(`Next: ${missionHint()}`, 408, 103);
+
+  drawPanel(916,12,352,158,'rgba(6,10,16,.78)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 16px system-ui'; ctx.fillText('Bracelet Upgrade / Attacks', 934, 36);
+  const normal=braceletAttackProfile(false), charged=braceletAttackProfile(true), cost=braceletUpgradeCost();
+  ctx.font='13px system-ui'; ctx.fillStyle='rgba(234,244,255,.94)';
+  ctx.fillText(`Tap: ${normal.name}  PWR ${Math.round(normal.power)}`, 934, 58);
+  ctx.fillText(`Hold: ${charged.name}  PWR ${Math.round(charged.power)}`, 934, 78);
+  ctx.fillText(`Next lab upgrade: ${cost.coins} coins + ${cost.relics} relics`, 934, 100);
+  ctx.fillText(player.lastBraceletAttack || 'Hold J/Space, release for Apex blaster.', 934, 122);
+  ctx.fillText('Broken homes contain coins, relics, maps, and supplies.', 934, 144);
+
+  drawTeamBar();
+  drawLog();
+  drawMiniStatus();
+  ctx.restore();
+}
+function missionHint() {
+  if (!allModules()) return 'collect all 4 suit cores before Apex capture';
+  if (!game.bossTamed) return 'charge the bracelet blaster, weaken Nexarion to 46%, then tame';
+  if (game.missionTamed < 7) return `capture ${7-game.missionTamed} more monster(s) to total 7`;
+  return 'reach the extraction ship; shield is unlocked';
+}
+function drawPanel(x,y,w,h,fill) {
+  const g = ctx.createLinearGradient(x,y,x,y+h);
+  g.addColorStop(0, fill || 'rgba(7,10,18,.82)');
+  g.addColorStop(1, 'rgba(9,14,22,.94)');
+  ctx.fillStyle=g; ctx.strokeStyle='rgba(255,255,255,.16)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.roundRect(x,y,w,h,14); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle='rgba(125,215,255,.14)'; ctx.strokeRect(x+8,y+8,w-16,h-16);
+}
+function drawBarUI(x,y,w,h,pct,label,col) {
+  ctx.fillStyle='rgba(255,255,255,.12)'; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle=col; ctx.fillRect(x,y,clamp(pct,0,1)*w,h);
+  ctx.strokeStyle='rgba(255,255,255,.22)'; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle='#ffffff'; ctx.font='11px system-ui'; ctx.fillText(label, x+4, y+h-2);
+}
+function drawTeamBar() {
+  const startX = 16, y = H-98, slotW=170, slotH=82;
+  for (let i=0;i<7;i++) {
+    const x = startX + i*(slotW+8);
+    const mon = game.team[i];
+    ctx.fillStyle = i===selectedSlot ? 'rgba(113,211,255,.30)' : 'rgba(5,9,15,.72)';
+    ctx.strokeStyle = i===selectedSlot ? '#75d7ff' : 'rgba(255,255,255,.16)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.roundRect(x,y,slotW,slotH,12); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#ffffff'; ctx.font='bold 13px system-ui'; ctx.fillText(`${i+1}`, x+9,y+19);
+    if (mon) {
+      const img = assets[mon.sprite] || assets.heat;
+      ctx.drawImage(img,x+18,y+22,48,48);
+      normalizeTamedMonster(mon);
+      ctx.font='bold 12px system-ui'; ctx.fillText(mon.name.slice(0,18), x+70,y+28);
+      ctx.font='11px system-ui'; ctx.fillText(`Lv ${mon.level} • ${mon.element}`, x+70,y+46);
+      drawBarUI(x+70,y+54,84,8,mon.hp/mon.maxHp,'',STATE_COLORS[mon.element]||'#fff');
+      const status = braceStatusText(mon);
+      ctx.fillStyle = mon.recovery>0 ? '#ffd3d3' : mon.hp < mon.maxHp ? '#9fe8ff' : '#b8ffb8';
+      ctx.fillText(status, x+70,y+74);
+    } else {
+      ctx.font='12px system-ui'; ctx.fillStyle='rgba(255,255,255,.55)'; ctx.fillText('empty slot', x+52, y+46);
+    }
+  }
+}
+function drawLog() {
+  const x=18,y=168;
+  ctx.font='13px system-ui';
+  if (!game.log.length) return;
+  drawPanel(x-6,y-22,445,24+game.log.length*20,'rgba(5,9,15,.54)');
+  game.log.forEach((l,i) => { ctx.fillStyle = i===0 ? '#ffffff' : 'rgba(234,244,255,.78)'; ctx.fillText(l.msg, x, y+i*20); });
+}
+function drawMiniStatus() {
+  const x=W-234,y=14,w=220,h=104;
+  drawPanel(x,y,w,h,'rgba(5,9,15,.72)');
+  ctx.fillStyle='#f9fbff'; ctx.font='bold 14px system-ui'; ctx.fillText('Input / Survival', x+14,y+25);
+  ctx.font='12px system-ui'; ctx.fillStyle='rgba(233,244,255,.86)';
+  ctx.fillText(input.gamepadName ? 'Gamepad detected' : 'Keyboard active', x+14,y+45);
+  ctx.fillText('J/Space tap shot • hold for charge', x+14,y+64);
+  ctx.fillText('E/F tame/search homes • R materialize', x+14,y+82);
+  ctx.fillText(assistMode?'Assist mode ON':'P/Esc pause • Assist OFF', x+14,y+100);
+}
+function drawMap() {
+  const mw=420,mh=300,x=W-mw-18,y=132;
+  drawPanel(x,y,mw,mh,'rgba(4,8,12,.86)');
+  ctx.fillStyle='#fff'; ctx.font='bold 16px system-ui'; ctx.fillText('Island Map', x+18,y+28);
+  const sx=mw/game.worldW, sy=(mh-52)/game.worldH;
+  const ox=x, oy=y+42;
+  for (const h of game.hazards) { ctx.fillStyle=(STATE_COLORS[h.type]||'#fff')+'55'; ctx.beginPath(); ctx.arc(ox+h.x*sx,oy+h.y*sy,h.r*sx,0,TAU); ctx.fill(); }
+  for (const c of game.crates) if (!c.taken) { ctx.fillStyle=c.kind==='module'?'#fff':'#ffd985'; ctx.fillRect(ox+c.x*sx-2,oy+c.y*sy-2,4,4); }
+  for (const n of (game.loreNodes || [])) { ctx.fillStyle=n.found?'#7f8797':loreColor(n.type); ctx.beginPath(); ctx.arc(ox+n.x*sx,oy+n.y*sy,3,0,TAU); ctx.fill(); }
+  for (const h of (game.homes||[])) { ctx.fillStyle=h.looted?'#777':'#d2a75b'; ctx.fillRect(ox+h.x*sx-3,oy+h.y*sy-3,6,6); }
+  if (game.boss && !game.bossTamed) { ctx.fillStyle='#ff70f5'; ctx.beginPath(); ctx.arc(ox+game.boss.x*sx,oy+game.boss.y*sy,6,0,TAU); ctx.fill(); }
+  const e=extractionZone(); ctx.fillStyle='#7dffc3'; ctx.beginPath(); ctx.arc(ox+e.x*sx,oy+e.y*sy,6,0,TAU); ctx.fill();
+  ctx.fillStyle='#73d7ff'; ctx.beginPath(); ctx.arc(ox+player.x*sx,oy+player.y*sy,6,0,TAU); ctx.fill();
+}
+
+function drawTitle() {
+  drawBackgroundPoster('titleKeyart');
+  drawPanel(52,48,1180,624,'rgba(5,9,15,.42)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 50px system-ui'; ctx.fillText('Sevenbound: Chimera Islands', 76, 108);
+  ctx.fillStyle='#83dcff'; ctx.font='bold 20px system-ui'; ctx.fillText('Genetically modified immortal monsters • survival • taming • tournaments • cure research', 78, 142);
+  ctx.font='16px system-ui'; ctx.fillStyle='rgba(235,247,255,.92)';
+  wrapText('Mission brief: survive an abandoned island, weaken wild monsters below 46% HP, tame seven unique specimens with the Sevenbound Brace, recover scientist diaries and final survivor notes, complete the four-core suit, then tame Nexarion Equinox and escape to the protected extraction ship.',78,176,690,24);
+  drawMenuItems(titleMenu(), 78, 330, 470);
+
+  drawPanel(790,92,390,236,'rgba(255,255,255,.07)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 24px system-ui'; ctx.fillText('Featured Apex Dossier', 820, 126);
+  ctx.fillStyle='rgba(235,247,255,.86)'; ctx.font='14px system-ui';
+  wrapText('Nexarion Equinox — the four-core chimera. This integrated key art now appears in the prototype as the boss dossier image and title poster. It shifts between heat, nival, void, cosmic, and fusion pressure states.',820,154,330,22);
+
+  const img = assets.titleKeyart;
+  if (img && img.complete && img.naturalWidth) {
+    const px = 835, py = 208, pw = 310, ph = 100;
+    const scale = Math.min(pw / img.width, ph / img.height);
+    const iw = img.width * scale, ih = img.height * scale;
+    ctx.drawImage(img, px + (pw-iw)/2, py + (ph-ih)/2, iw, ih);
+  }
+
+  drawPanel(790,350,390,235,'rgba(255,255,255,.07)');
+  ctx.fillStyle='#ffd985'; ctx.font='bold 22px system-ui'; ctx.fillText('Core Rules', 820, 384);
+  ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='14px system-ui';
+  const rules = [
+    '• Keep up to 7 active monsters in the Brace.',
+    '• Extra tamed monsters go to the lab for research.',
+    '• Wild monsters must be weakened below 46% HP to tame.',
+    '• If a partner falls, it recovers and can be reused later.',
+    '• Extraction stays locked until 7 tames + Nexarion are secured.'
+  ];
+  let ry = 414;
+  for (const line of rules) { ctx.fillText(line, 820, ry); ry += 28; }
+
+  ctx.font='14px system-ui'; ctx.fillStyle='rgba(255,255,255,.72)';
+  ctx.fillText('Playable with keyboard, gamepad, Steam Deck, or any Steam-supported input layout.', 78, 640);
+}
+function drawBackgroundPoster(image='titleKeyart') {
+  ctx.fillStyle = '#081019';
+  ctx.fillRect(0,0,W,H);
+  const img = assets[image];
+  if (img && img.complete && img.naturalWidth) {
+    const scale = Math.max(W / img.width, H / img.height);
+    const iw = img.width * scale;
+    const ih = img.height * scale;
+    const ix = (W - iw) / 2;
+    const iy = (H - ih) / 2;
+    ctx.save();
+    ctx.globalAlpha = image === 'missionComplete' ? 0.92 : 0.75;
+    ctx.filter = image === 'missionComplete' ? 'blur(0px) saturate(1.05)' : 'blur(1px) saturate(1.05)';
+    ctx.drawImage(img, ix, iy, iw, ih);
+    ctx.restore();
+  }
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'rgba(3,6,12,.55)');
+  grad.addColorStop(.45,'rgba(5,10,18,.65)');
+  grad.addColorStop(1,'rgba(4,8,15,.92)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,W,H);
+  for (let i=0;i<26;i++) {
+    const x = (i * 97) % W;
+    const y = (i * 59) % H;
+    ctx.fillStyle = 'rgba(255,255,255,.045)';
+    ctx.fillRect(x,y,2,2);
+  }
+}
+function drawPause() {
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(0,0,W,H);
+  drawPanel(395,110,490,450,'rgba(5,9,15,.88)');
+  ctx.fillStyle='#fff'; ctx.font='bold 42px system-ui'; ctx.fillText('Paused', 435, 175);
+  drawMenuItems(pauseMenu(), 435, 235, 385);
+}
+function drawControls() {
+  drawBackgroundPoster('missionComplete');
+  drawPanel(70,52,1140,612,'rgba(5,9,15,.88)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 40px system-ui'; ctx.fillText('Controls / Steam Input Layout', 105, 102);
+  const rows = [
+    ['Move', 'WASD / Arrow Keys', 'Left Stick'],
+    ['Tap/hold bracelet weapon', 'J or Space', 'A / RT on many controllers'],
+    ['Dodge', 'K', 'B'],
+    ['Scan, tame, collect', 'E or F', 'X'],
+    ['Materialize / recall selected monster', 'R', 'Y'],
+    ['Select monster slot', '1-7 or Q/L', 'LB / RB'],
+    ['Use supply', 'H', 'D-pad Down'],
+    ['Map', 'M', 'Back/View'],
+    ['Lore archive / read records', 'C or Tab', 'D-pad Up'],
+    ['Pause', 'P or Esc', 'Start/Menu']
+  ];
+  let y=150;
+  ctx.fillStyle='#83dcff'; ctx.font='bold 15px system-ui'; ctx.fillText('Action',115,y); ctx.fillText('Keyboard',420,y); ctx.fillText('Gamepad / Steam Input action',760,y); y+=24;
+  for (const r of rows) { ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='15px system-ui'; ctx.fillText(r[0],115,y); ctx.fillText(r[1],420,y); ctx.fillText(r[2],760,y); y+=32; }
+  y+=10;
+  ctx.fillStyle='#f9fbff'; ctx.font='bold 18px system-ui'; ctx.fillText('Recommended Steam Input actions',115,y); y+=28;
+  ctx.font='15px system-ui'; ctx.fillStyle='rgba(235,247,255,.86)';
+  wrapText('Use action names instead of device names: Move, Camera, Confirm, Cancel, AttackCommand, Dodge, TameScan, Interact, MaterializeRecall, SlotPrevious, SlotNext, UseSupply, Map, LoreArchive, Pause. This lets Steam map keyboards, Xbox, PlayStation, Switch-style controllers, and Steam Deck layouts cleanly.',115,y,650,24); y+=114;
+  ctx.fillStyle=assistMode?'#9aff7d':'#ffd985'; ctx.font='bold 17px system-ui';
+  ctx.fillText(`Assist Mode: ${assistMode?'ON':'OFF'}  — press Left/Right to toggle`,115,y); y+=34;
+  ctx.fillStyle='rgba(255,255,255,.75)'; ctx.font='15px system-ui';
+  ctx.fillText('Press Enter/A/Esc to return.',115,y+28);
+
+  drawPanel(815,164,330,350,'rgba(255,255,255,.07)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 22px system-ui'; ctx.fillText('Integrated extraction art', 842, 198);
+  const img = assets.missionComplete;
+  if (img && img.complete && img.naturalWidth) {
+    const px = 840, py = 220, pw = 280, ph = 160;
+    const scale = Math.min(pw / img.width, ph / img.height);
+    const iw = img.width * scale, ih = img.height * scale;
+    ctx.drawImage(img, px + (pw-iw)/2, py + (ph-ih)/2, iw, ih);
+  }
+  ctx.fillStyle='rgba(235,247,255,.86)'; ctx.font='14px system-ui';
+  wrapText('The mission-complete image is now used inside the prototype as a cinematic extraction reference. It previews the protected ship, opened shield, and post-mission flow to the lab.',842,408,275,22);
+}
+function drawJournal() {
+  drawBackgroundPoster();
+  drawPanel(70,52,1140,612,'rgba(5,9,15,.88)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 36px system-ui'; ctx.fillText('Lost Records Archive', 105, 105);
+  ctx.font='15px system-ui'; ctx.fillStyle='rgba(235,247,255,.88)';
+  wrapText('Recovered scientist diaries, Bible verse wall inscriptions, and final survivor notes from abandoned islands. These records explain the disaster, point to supplies, and reveal how to tame unstable monsters without killing them.',105,132,1020,22);
+  const items = collectedLore();
+  if (!items.length) {
+    ctx.fillStyle='#ffd985'; ctx.font='bold 20px system-ui'; ctx.fillText('No records recovered yet.', 105, 235);
+    ctx.font='16px system-ui'; ctx.fillStyle='rgba(235,247,255,.86)';
+    wrapText('Explore ruined buildings and look for blue diaries, gold wall verse plates, and red survivor notes. Press E/F near one to recover it.',105,270,960,25);
+    ctx.fillStyle='rgba(255,255,255,.7)'; ctx.fillText('Press C, Tab, Esc, or Start/Menu to return.',105,610);
+    return;
+  }
+  loreIndex = clamp(loreIndex, 0, items.length-1);
+  const visible = 9;
+  const start = clamp(loreIndex - 4, 0, Math.max(0, items.length-visible));
+  ctx.fillStyle='#83dcff'; ctx.font='bold 15px system-ui'; ctx.fillText('Recovered records',105,218);
+  for (let i=0;i<Math.min(visible, items.length-start);i++) {
+    const idx = start+i, item = items[idx], y = 250+i*42;
+    ctx.fillStyle = idx === loreIndex ? 'rgba(117,215,255,.25)' : 'rgba(255,255,255,.07)';
+    ctx.strokeStyle = idx === loreIndex ? '#75d7ff' : 'rgba(255,255,255,.12)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.roundRect(105,y-25,510,34,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=loreColor(item.type); ctx.font='bold 13px system-ui'; ctx.fillText(loreTypeLabel(item.type), 118, y-4);
+    ctx.fillStyle='#ffffff'; ctx.font='13px system-ui'; ctx.fillText(item.title.slice(0,42), 265, y-4);
+  }
+  const selected = items[loreIndex];
+  drawPanel(650,215,500,360,'rgba(255,255,255,.07)');
+  ctx.fillStyle=loreColor(selected.type); ctx.font='bold 15px system-ui'; ctx.fillText(loreTypeLabel(selected.type), 680, 252);
+  ctx.fillStyle='#ffffff'; ctx.font='bold 23px system-ui'; wrapText(selected.title, 680, 287, 430, 28);
+  ctx.font='14px system-ui'; ctx.fillStyle='rgba(235,247,255,.82)'; ctx.fillText(`Author: ${selected.author || 'Unknown'}`, 680, 350);
+  if (selected.verse) ctx.fillText(`Bible reference: ${selected.verse}`, 680, 374);
+  ctx.fillStyle='rgba(235,247,255,.9)'; ctx.font='15px system-ui';
+  wrapText(selected.text, 680, selected.verse ? 410 : 392, 430, 22);
+  ctx.fillStyle='rgba(255,255,255,.7)'; ctx.font='14px system-ui';
+  ctx.fillText('Up/Down select • Enter/A open • C/Tab/Esc return',105,626);
+}
+
+function drawLoreReader() {
+  const n = activeLore;
+  if (!n) return;
+  drawPanel(180,70,920,560,'rgba(4,8,14,.94)');
+  ctx.fillStyle=loreColor(n.type); ctx.font='bold 16px system-ui'; ctx.fillText(loreTypeLabel(n.type), 225, 120);
+  ctx.fillStyle='#ffffff'; ctx.font='bold 32px system-ui'; wrapText(n.title || 'Lost Record', 225, 158, 800, 36);
+  ctx.font='15px system-ui'; ctx.fillStyle='rgba(235,247,255,.82)';
+  ctx.fillText(`Author / source: ${n.author || 'Unknown'}`, 225, 235);
+  if (n.island) ctx.fillText(`Recovered on: ${n.island}`, 225, 260);
+  if (n.verse) ctx.fillText(`Bible reference: ${n.verse}`, 225, n.island ? 285 : 260);
+  ctx.fillStyle='rgba(255,255,255,.93)'; ctx.font='18px system-ui';
+  const bodyY = n.verse ? (n.island ? 326 : 304) : (n.island ? 298 : 276);
+  wrapText(n.text || '', 225, bodyY, 810, 28);
+  if (n.clue) {
+    drawPanel(225,500,810,62,'rgba(117,215,255,.10)');
+    ctx.fillStyle='#83dcff'; ctx.font='bold 15px system-ui'; ctx.fillText('Field interpretation', 245, 524);
+    ctx.fillStyle='rgba(235,247,255,.88)'; ctx.font='14px system-ui'; wrapText(n.clue, 245, 546, 760, 20);
+  }
+  ctx.fillStyle='rgba(255,255,255,.7)'; ctx.font='14px system-ui';
+  ctx.fillText(loreReturnScreen === 'journal' ? 'Press Enter/A/Esc to return to archive.' : 'Press Enter/A/Esc/E/F to close and continue.', 225, 596);
+}
+
+function drawNpc(x,y,accent,name,role) {
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,.32)'; ctx.beginPath(); ctx.ellipse(x,y+38,44,16,0,0,TAU); ctx.fill();
+  ctx.fillStyle='rgba(210,230,245,.92)'; ctx.beginPath(); ctx.roundRect(x-18,y-10,36,55,12); ctx.fill();
+  ctx.strokeStyle=accent; ctx.lineWidth=3; ctx.stroke();
+  ctx.fillStyle='#f2d6c8'; ctx.beginPath(); ctx.arc(x,y-24,16,0,TAU); ctx.fill();
+  ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(x+9,y-29,4,0,TAU); ctx.fill();
+  ctx.strokeStyle=accent; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(x-12,y+5); ctx.lineTo(x+12,y+5); ctx.stroke();
+  ctx.fillStyle='#ffffff'; ctx.font='bold 12px system-ui'; ctx.textAlign='center'; ctx.fillText(name,x,y+64);
+  ctx.fillStyle='rgba(235,247,255,.74)'; ctx.font='11px system-ui'; ctx.fillText(role,x,y+80);
+  ctx.restore();
+}
+function drawLabNPCs(x=760,y=565) {
+  drawNpc(x,y,'#83dcff','Dr. Valez','Brace Systems');
+  drawNpc(x+125,y+10,'#9aff7d','Dr. Rowan','Cure Research');
+  drawNpc(x+250,y,'#ffd985','Chief Ortega','Containment');
+  drawNpc(x+370,y+8,'#caa7ff','Director Sato','Command');
+}
+function drawLabBriefing() {
+  drawBackgroundPoster('missionComplete');
+  drawPanel(56,54,1170,622,'rgba(4,8,14,.84)');
+  drawLabNPCs(760,470);
+  const item = labBriefingQueue[clamp(labBriefingIndex,0,Math.max(0,labBriefingQueue.length-1))] || {speaker:'A.R.K. System',role:'Lab',text:'No new briefing.'};
+  ctx.fillStyle='#ffffff'; ctx.font='bold 38px system-ui'; ctx.fillText('Genova Lab Arrival Briefing', 92, 112);
+  ctx.fillStyle='#83dcff'; ctx.font='bold 16px system-ui'; ctx.fillText(`Message ${Math.min(labBriefingIndex+1, labBriefingQueue.length)} / ${Math.max(1, labBriefingQueue.length)}`, 94, 144);
+  drawPanel(92,178,686,330,'rgba(255,255,255,.08)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 28px system-ui'; ctx.fillText(item.speaker, 124, 232);
+  ctx.fillStyle='#ffd985'; ctx.font='bold 16px system-ui'; ctx.fillText(item.role, 124, 260);
+  ctx.fillStyle='rgba(235,247,255,.94)'; ctx.font='20px system-ui';
+  wrapText(item.text, 124, 310, 620, 30);
+  drawPanel(820,128,350,260,'rgba(255,255,255,.07)');
+  ctx.fillStyle='#9aff7d'; ctx.font='bold 20px system-ui'; ctx.fillText('Current impact', 846, 164);
+  ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='16px system-ui';
+  ctx.fillText(`People helped: ${game.peopleSaved || 0}`, 846, 202);
+  ctx.fillText(`Reserve specimens: ${labSpecimensAll().length}`, 846, 231);
+  ctx.fillText(`Total tamed: ${game.totalCaptured || 0}`, 846, 260);
+  ctx.fillText(`Breakthroughs: ${(game.labBreakthroughs||[]).length}`, 846, 289);
+  ctx.fillText(`Research points: ${game.research || 0}`, 846, 318);
+  ctx.fillStyle='rgba(255,255,255,.7)'; ctx.font='15px system-ui';
+  ctx.fillText('Enter / A / Down: next message', 124, 560);
+  ctx.fillText('Esc / B: skip to lab', 124, 586);
+}
+function drawLabConsole() {
+  drawBackgroundPoster('missionComplete');
+  drawPanel(42,42,1196,636,'rgba(3,7,12,.9)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 34px system-ui'; ctx.fillText('Genova Lab Research Console', 74, 92);
+  ctx.fillStyle='rgba(235,247,255,.8)'; ctx.font='15px system-ui';
+  ctx.fillText('Scientist messages, research advances, treatment impact, and reserve specimen database.', 76, 120);
+  const rows = labConsoleRows();
+  labConsoleIndex = clamp(labConsoleIndex,0,Math.max(0,rows.length-1));
+  const listX=74, listY=156, listW=560, rowH=42, visible=12;
+  const start = clamp(labConsoleIndex-5,0,Math.max(0,rows.length-visible));
+  drawPanel(listX-12,listY-34,listW+24,visible*rowH+54,'rgba(255,255,255,.06)');
+  ctx.fillStyle='#83dcff'; ctx.font='bold 14px system-ui'; ctx.fillText(`Console feed (${rows.length} entries)`, listX, listY-12);
+  for (let i=0;i<Math.min(visible, rows.length-start);i++) {
+    const idx=start+i, r=rows[idx], y=listY+i*rowH;
+    ctx.fillStyle = idx===labConsoleIndex ? 'rgba(117,215,255,.24)' : 'rgba(255,255,255,.055)';
+    ctx.strokeStyle = idx===labConsoleIndex ? '#75d7ff' : 'rgba(255,255,255,.10)';
+    ctx.lineWidth=1.5; ctx.beginPath(); ctx.roundRect(listX,y,listW,rowH-6,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=r.color || '#fff'; ctx.font='bold 12px system-ui'; ctx.fillText(r.kind.toUpperCase(), listX+12,y+16);
+    ctx.fillStyle='#ffffff'; ctx.font='bold 14px system-ui'; ctx.fillText(shortText(r.title,48), listX+120,y+16);
+    ctx.fillStyle='rgba(235,247,255,.72)'; ctx.font='12px system-ui'; ctx.fillText(shortText(r.body,78), listX+120,y+32);
+  }
+  const selected = rows[labConsoleIndex] || {};
+  drawPanel(680,156,480,430,'rgba(255,255,255,.07)');
+  ctx.fillStyle=selected.color || '#83dcff'; ctx.font='bold 16px system-ui'; ctx.fillText((selected.kind || 'entry').toUpperCase(), 710, 194);
+  ctx.fillStyle='#ffffff'; ctx.font='bold 26px system-ui'; wrapText(selected.title || 'No entry', 710, 232, 420, 30);
+  ctx.fillStyle='rgba(235,247,255,.92)'; ctx.font='17px system-ui'; wrapText(selected.body || '', 710, 310, 420, 25);
+  if (selected.mon) {
+    const m=selected.mon;
+    const img=assets[m.sprite] || assets.heat;
+    if (img && img.complete) ctx.drawImage(img, 710, 430, 82, 82);
+    ctx.fillStyle='rgba(255,255,255,.84)'; ctx.font='14px system-ui';
+    ctx.fillText(`HP ${Math.round(m.hp||0)} / ${Math.round(m.maxHp||0)}   Stress ${Math.round(m.stress||0)}`, 812, 452);
+    ctx.fillText(`Power ${Math.round(m.power||0)}   Recovery ${Math.ceil(m.recovery||0)}s`, 812, 477);
+    ctx.fillText(`Latest skill: ${m.lastSkillUsed || (m.skills&&m.skills[0]?.name) || 'none'}`, 812, 502);
+  }
+  drawPanel(682,604,480,48,'rgba(117,215,255,.10)');
+  ctx.fillStyle='rgba(255,255,255,.78)'; ctx.font='14px system-ui';
+  ctx.fillText('Up/Down or Enter/A scroll • Left/Right jump • Esc/B return to lab', 704, 634);
+}
+function drawLab() {
+  refreshLabResearch(false);
+  drawBackgroundPoster('missionComplete');
+  drawPanel(60,50,1160,660,'rgba(5,9,15,.82)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 38px system-ui'; ctx.fillText('Genova Lab: Decontamination & Research Wing', 96, 108);
+  ctx.font='16px system-ui'; ctx.fillStyle='rgba(235,247,255,.9)';
+  wrapText(lastLabMessage || 'Lab ready. Scientists are studying reserve monsters, updating cure models, and preparing new containment habitats.', 98, 142, 650, 24);
+  drawPanel(96,220,450,168,'rgba(255,255,255,.07)');
+  ctx.fillStyle='#83dcff'; ctx.font='bold 20px system-ui'; ctx.fillText('Research progress', 122, 254);
+  ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='16px system-ui';
+  ctx.fillText(`People helped / saved estimate: ${game.peopleSaved || 0}`, 122, 286);
+  ctx.fillText(`Reserve lab specimens: ${game.labSpecimens.length}`, 122, 314);
+  ctx.fillText(`Total captured: ${game.totalCaptured}`, 122, 342);
+  ctx.fillText(`Research points: ${game.research}`, 122, 370);
+  ctx.fillText(`Breakthroughs unlocked: ${(game.labBreakthroughs||[]).length}`, 122, 398);
+  drawMenuItems(labMenu(), 96, 450, 475);
+  drawPanel(620,182,520,118,'rgba(117,215,255,.10)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 22px system-ui'; ctx.fillText('Science console ready', 650, 222);
+  ctx.fillStyle='rgba(235,247,255,.86)'; ctx.font='15px system-ui';
+  wrapText('Open the Research Console to read scientist messages, scroll discoveries, and inspect every reserve monster you delivered.',650,252,465,22);
+  drawLabTeamPreview(615,340);
+  drawLabNPCs(700,560);
+}
+function drawLabTeamPreview(x,y) {
+  ctx.fillStyle='#83dcff'; ctx.font='bold 20px system-ui'; ctx.fillText('Seven-slot brace roster', x, y);
+  for (let i=0;i<7;i++) {
+    const mon = game.team[i]; const yy = y+35+i*42;
+    ctx.fillStyle='rgba(255,255,255,.08)'; ctx.fillRect(x,yy-21,480,34);
+    ctx.fillStyle='#fff'; ctx.font='bold 14px system-ui'; ctx.fillText(`${i+1}. ${mon?mon.name:'empty'}`, x+10, yy);
+    if (mon) { ctx.font='13px system-ui'; ctx.fillStyle='rgba(255,255,255,.78)'; ctx.fillText(`Lv ${mon.level} ${mon.element}  DNA ${mon.dna}  Bond ${Math.round(mon.bond||0)}`, x+205, yy); }
+  }
+}
+function drawVictory() {
+  drawBackgroundPoster('missionComplete');
+  drawPanel(188,82,904,520,'rgba(5,9,15,.78)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 44px system-ui'; ctx.fillText('Mission Success', 236, 146);
+  ctx.font='17px system-ui'; ctx.fillStyle='rgba(235,247,255,.92)';
+  wrapText('You escaped the abandoned island with your monsters, research data, and Nexarion Equinox accommodation plan. The protected extraction ship and unlocked shield are now represented by the integrated concept art below.',236,182,430,25);
+  const img = assets.missionComplete;
+  if (img && img.complete && img.naturalWidth) {
+    const px = 690, py = 128, pw = 350, ph = 230;
+    const scale = Math.min(pw / img.width, ph / img.height);
+    const iw = img.width * scale, ih = img.height * scale;
+    ctx.drawImage(img, px + (pw-iw)/2, py + (ph-ih)/2, iw, ih);
+  }
+  ctx.fillStyle='#83dcff'; ctx.font='bold 18px system-ui'; ctx.fillText('Post-mission flow', 236, 292);
+  ctx.fillStyle='rgba(255,255,255,.88)'; ctx.font='15px system-ui';
+  wrapText('1) Decontamination. 2) Monster recovery and habitat support. 3) Disease-cure research from reserve DNA. 4) Tournaments. 5) New island expeditions with stronger procedural monsters.',236,322,380,24);
+  drawMenuItems(victoryMenu(), 236, 430, 380);
+}
+function drawGameOver() {
+  drawBackgroundPoster();
+  drawPanel(270,120,740,430,'rgba(45,5,12,.88)');
+  ctx.fillStyle='#ffffff'; ctx.font='bold 46px system-ui'; ctx.fillText('You Died on the Island', 320, 190);
+  ctx.font='17px system-ui'; ctx.fillStyle='rgba(255,230,230,.92)';
+  wrapText(lastLabMessage || 'The wild environment overwhelmed you. Respawn reloads the last Recovery Beacon save with progress up to that point.',320,225,610,25);
+  drawMenuItems(gameOverMenu(), 320, 330, 520);
+}
+function drawMenuItems(items,x,y,w) {
+  ctx.font='bold 20px system-ui';
+  for (let i=0;i<items.length;i++) {
+    const yy = y+i*52;
+    ctx.fillStyle = i===menuIndex ? 'rgba(117,215,255,.28)' : 'rgba(255,255,255,.07)';
+    ctx.strokeStyle = i===menuIndex ? '#75d7ff' : 'rgba(255,255,255,.16)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.roundRect(x, yy-30, w, 42, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = i===menuIndex ? '#ffffff' : 'rgba(235,247,255,.82)';
+    ctx.fillText(items[i].label, x+18, yy-3);
+  }
+}
+function drawNotifications() {
+  let y = 24;
+  ctx.font='bold 14px system-ui';
+  for (const n of notifications) {
+    const w = ctx.measureText(n.msg).width + 28;
+    drawPanel(W/2-w/2,y,w,34,'rgba(5,9,15,.82)');
+    ctx.fillStyle='#fff'; ctx.fillText(n.msg,W/2-w/2+14,y+22);
+    y+=40;
+  }
+}
+function wrapText(text,x,y,maxWidth,lineHeight) {
+  const words = String(text).split(' '); let line='';
+  for (const word of words) {
+    const test=line+word+' ';
+    if (ctx.measureText(test).width > maxWidth && line) { ctx.fillText(line,x,y); line=word+' '; y+=lineHeight; }
+    else line=test;
+  }
+  if (line) ctx.fillText(line,x,y);
+}
+
+function boot() {
+  loading.style.display = 'none';
+  setScreen('title');
+  requestAnimationFrame(loop);
+}
+function loop(t) {
+  const dt = Math.min(.033, (t-lastTime)/1000 || .016); lastTime = t;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+
+if (assetsLoaded === Object.keys(assetPaths).length) boot();
+})();
+</script>
+</body>
+</html>
