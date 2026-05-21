@@ -112,6 +112,5 @@ This is a playable prototype, not a finished commercial game. The current build 
 
 ## Creator
 
-Concept and game direction: **Marcelo Collado**
+Concept and game direction: **xatusbetazx17**
 
-Prototype support and implementation assistance: ChatGPT
